@@ -1,0 +1,356 @@
+#ifndef CAC_MEAM_H
+#define CAC_MEAM_H
+
+#include <cmath>
+#include <cstring>
+#include "math_const.h"
+#include "pointers.h"
+
+
+#define maxelt 5
+#define MAX3 20
+
+namespace CAC_NS {
+class Memory;
+class Atom;
+class Element;
+class Error;
+
+typedef enum { FCC, BCC, HCP, DIM, DIA, DIA3, B1, C11, L12, B2, CH4, LIN, ZIG, TRI } lattice_t;
+
+class MEAM
+{
+public:
+  MEAM(Memory* mem, Atom* atm, Element* elem, Error *err);
+  ~MEAM();
+
+  //debug
+  int debug;
+  FILE *fp_pair;
+  FILE *fp_three_body;
+  FILE *fp_three_body_k;
+
+  void write_dens();
+  class CAC *cac;
+private:
+  Memory* memory;
+  Atom* atom;
+  Element* element; 
+  Error* error;
+
+  // cutforce = force cutoff
+  // cutforcesq = force cutoff squared
+
+  double cutforce, cutforcesq;
+
+  // Ec_meam = cohesive energy
+  // re_meam = nearest-neighbor distance
+  // B_meam = bulk modulus
+  // ielt_meam = atomic number of element
+  // A_meam = adjustable parameter
+  // alpha_meam = sqrt(9*Omega*B/Ec)
+  // rho0_meam = density scaling parameter
+  // delta_meam = heat of formation for alloys
+  // beta[0-3]_meam = electron density constants
+  // t[0-3]_meam = coefficients on densities in Gamma computation
+  // rho_ref_meam = background density for reference structure
+  // ibar_meam(i) = selection parameter for Gamma function for elt i,
+  // lattce_meam(i,j) = lattce configuration for elt i or alloy (i,j)
+  // neltypes = maximum number of element type defined
+  // eltind = index number of pair (similar to Voigt notation; ij = ji)
+  // phir = pair potential function array
+  // phirar[1-6] = spline coeffs
+  // attrac_meam = attraction parameter in Rose energy
+  // repuls_meam = repulsion parameter in Rose energy
+  // nn2_meam = 1 if second nearest neighbors are to be computed, else 0
+  // zbl_meam = 1 if zbl potential for small r to be use, else 0
+  // emb_lin_neg = 1 if linear embedding function for rhob to be used, else 0
+  // bkgd_dyn = 1 if reference densities follows Dynamo, else 0
+  // Cmin_meam, Cmax_meam = min and max values in screening cutoff
+  // rc_meam = cutoff distance for meam
+  // delr_meam = cutoff region for meam
+  // ebound_meam = factor giving maximum boundary of screen fcn ellipse
+  // augt1 = flag for whether t1 coefficient should be augmented
+  // ialloy = flag for newer alloy formulation (as in dynamo code)
+  // mix_ref_t = flag to recover "old" way of computing t in reference config
+  // erose_form = selection parameter for form of E_rose function
+  // gsmooth_factor = factor determining length of G smoothing region
+  // vind[23]D = Voight notation index maps for 2 and 3D
+  // v2D,v3D = array of factors to apply for Voight notation
+
+  // nr,dr = pair function discretization parameters
+  // nrar,rdrar = spline coeff array parameters
+
+  // theta = angle between three atoms in line, zigzag, and trimer reference structures
+  // stheta_meam = sin(theta/2) in radian used in line, zigzag, and trimer reference structures
+  // ctheta_meam = cos(theta/2) in radian used in line, zigzag, and trimer reference structures
+
+  double Ec_meam[maxelt][maxelt], re_meam[maxelt][maxelt];
+  double A_meam[maxelt], alpha_meam[maxelt][maxelt], rho0_meam[maxelt];
+  double delta_meam[maxelt][maxelt];
+  double beta0_meam[maxelt], beta1_meam[maxelt];
+  double beta2_meam[maxelt], beta3_meam[maxelt];
+  double t0_meam[maxelt], t1_meam[maxelt];
+  double t2_meam[maxelt], t3_meam[maxelt];
+  double rho_ref_meam[maxelt];
+  int ibar_meam[maxelt], ielt_meam[maxelt];
+  lattice_t lattce_meam[maxelt][maxelt];
+  int nn2_meam[maxelt][maxelt];
+  int zbl_meam[maxelt][maxelt];
+  int eltind[maxelt][maxelt];
+  int neltypes;
+
+  double **phir;
+  double **phirar, **phirar1, **phirar2, **phirar3, **phirar4, **phirar5, **phirar6;
+
+  double attrac_meam[maxelt][maxelt], repuls_meam[maxelt][maxelt];
+
+  double Cmin_meam[maxelt][maxelt][maxelt];
+  double Cmax_meam[maxelt][maxelt][maxelt];
+  double rc_meam, delr_meam, ebound_meam[maxelt][maxelt];
+  int augt1, ialloy, mix_ref_t, erose_form;
+  int emb_lin_neg, bkgd_dyn;
+  double gsmooth_factor;
+
+  int vind2D[3][3], vind3D[3][3][3];                  // x-y-z to Voigt-like index
+  int v2D[6], v3D[10];                                // multiplicity of Voigt index (i.e. [1] -> xy+yx = 2
+
+  int nr, nrar;
+  double dr, rdrar;
+
+  // 3-body neighbor pair info to calculate 3-body terms when the pair of neighbor are interpolated atoms
+  //struct ThreeBodyPair {
+  //  int j,jintpl;
+  //  int k,kintpl;
+  //  double sjk;
+  //  double dscrfcnjk;
+  //};
+
+public:
+  int namax,nemax;
+
+  // atom based arrays
+  // rho and gamma arrays seem unnecessary, can be deleted later to save memory
+
+  double *atomrho, *atomrho0, *atomrho1, *atomrho2, *atomrho3, *atomfrhop;
+  double *atomgamma, *atomdgamma1, *atomdgamma2, *atomdgamma3, *atomarho2b;
+  double **atomarho1, **atomarho2, **atomarho3, **atomarho3b, **atomt_ave, **atomtsq_ave;
+
+  // node based arrays
+
+  double **noderho, **noderho0, **noderho1, **noderho2, **noderho3, **nodefrhop;
+  double **nodegamma, **nodedgamma1, **nodedgamma2, **nodedgamma3, **nodearho2b;
+  double ***nodearho1, ***nodearho2, ***nodearho3, ***nodearho3b, ***nodet_ave, ***nodetsq_ave;
+
+  int maxneigh;
+  double *scrfcn, *dscrfcn, *fcpair;  // screening functions (will be shared by atoms and elements)
+
+  double max_ebound_meam;
+  //angle for trimer, zigzag, line reference structures
+  double stheta_meam[maxelt][maxelt];
+  double ctheta_meam[maxelt][maxelt];
+
+protected:
+  // meam_funcs.cpp
+
+  //-----------------------------------------------------------------------------
+  // Cutoff function
+  //
+  static double fcut(const double xi) {
+    double a;
+    if (xi >= 1.0)
+      return 1.0;
+    else if (xi <= 0.0)
+      return 0.0;
+    else {
+      // ( 1.d0 - (1.d0 - xi)**4 )**2, but with better codegen
+      a = 1.0 - xi;
+      a *= a; a *= a;
+      a = 1.0 - a;
+      return a * a;
+    }
+  }
+
+  //-----------------------------------------------------------------------------
+  // Cutoff function and derivative
+  //
+  static double dfcut(const double xi, double& dfc) {
+    double a, a3, a4, a1m4;
+    if (xi >= 1.0) {
+      dfc = 0.0;
+      return 1.0;
+    } else if (xi <= 0.0) {
+      dfc = 0.0;
+      return 0.0;
+    } else {
+      a = 1.0 - xi;
+      a3 = a * a * a;
+      a4 = a * a3;
+      a1m4 = 1.0-a4;
+
+      dfc = 8 * a1m4 * a3;
+      return a1m4*a1m4;
+    }
+  }
+
+  //-----------------------------------------------------------------------------
+  // Derivative of Cikj w.r.t. rij
+  //     Inputs: rij,rij2,rik2,rjk2
+  //
+  static double dCfunc(const double rij2, const double rik2, const double rjk2) {
+    double rij4, a, asq, b,denom;
+
+    rij4 = rij2 * rij2;
+    a = rik2 - rjk2;
+    b = rik2 + rjk2;
+    asq = a*a;
+    denom = rij4 - asq;
+    denom = denom * denom;
+    return -4 * (-2 * rij2 * asq + rij4 * b + asq * b) / denom;
+  }
+
+  //-----------------------------------------------------------------------------
+  // Derivative of Cikj w.r.t. rik and rjk
+  //     Inputs: rij,rij2,rik2,rjk2
+  //
+  static void dCfunc2(const double rij2, const double rik2, const double rjk2,
+      double& dCikj1, double& dCikj2) {
+    double rij4, rik4, rjk4, a, denom;
+
+    rij4 = rij2 * rij2;
+    rik4 = rik2 * rik2;
+    rjk4 = rjk2 * rjk2;
+    a = rik2 - rjk2;
+    denom = rij4 - a * a;
+    denom = denom * denom;
+    dCikj1 = 4 * rij2 * (rij4 + rik4 + 2 * rik2 * rjk2 - 3 * rjk4 - 2 * rij2 * a) / denom;
+    dCikj2 = 4 * rij2 * (rij4 + rjk4 + 2 * rik2 * rjk2 - 3 * rik4 + 2 * rij2 * a) / denom;
+  }
+
+  double G_gam(const double gamma, const int ibar, int &errorflag) const;
+  double dG_gam(const double gamma, const int ibar, double &dG) const;
+  static double zbl(const double r, const int z1, const int z2);
+  double embedding(const double A, const double Ec, const double rhobar, double& dF) const;
+  static double erose(const double r, const double re, const double alpha, const double Ec, const double repuls, const double attrac, const int form);
+
+  static void get_shpfcn(const lattice_t latt, const double sthe, const double cthe, double (&s)[3]);
+
+  static int get_Zij2(const lattice_t latt, const double cmin, const double cmax,
+      const double sthe, double &a, double &S);
+  static int get_Zij2_b2nn(const lattice_t latt, const double cmin, const double cmax, double &S);
+
+protected:
+  void meam_checkindex(int, int, int, int*, int*);
+  void getscreen(int i, int iintg, int inode, double *scrfcn, double *dscrfcn, double *fcpair, int *fmap,
+      int numneigha_half, int *firstneigha_half, int numneigha_full, int *firstneigha_full, 
+      int numneighia_half, int *firstneighia_half, int *firstneighia_index_half, 
+      int numneighia_full, int *firstneighia_full, int *firstneighia_index_full);
+  int compute_screen(double xi, double yi, double zi, double xj, double yj, double zj, double xk, double yk, double zk, int elti, int eltj, int eltk, double rbound, double rij2, double &sikj, double &coef1, double &dCikj);
+  void calc_rho1(int i, int iintg, int inode, int *fmap, double *scrfcn, double *fcpair,
+      int numneigha_half, int *firstneigha_half, int numneigha_full, int *firstneigha_full, 
+      int numneighia_half, int *firstneighia_half, int *firstneighia_index_half, 
+      int numneighia_full, int *firstneighia_full, int *firstneighia_index_full);
+
+  void compute_phi_phip(int elti, int eltj, double rij, double &phi, double &phip);
+  void compute_pair_force(double *dUdrijm, double &dUdsij, double &force, double pair_dscrfcn,
+      int elti, int eltj, double scaleij, double *idensities, double *jdensities,
+      double *delij, double rij, double rij2, double phi, double phip, double sij);
+  void copy_densities(double *densities, int i, int inode, int iintpl);
+
+  void alloyparams();
+  void compute_pair_meam();
+  double phi_meam(double, int, int);
+  const double phi_meam_series(const double scrn, const int Z1, const int Z2, const int a, const int b, const double r, const double arat);
+  void compute_reference_density();
+  void get_tavref(double*, double*, double*, double*, double*, double*, double, double, double, double,
+      double, double, double, int, int, lattice_t);
+  void get_sijk(double, int, int, int, double*);
+  void get_densref(double, int, int, double*, double*, double*, double*, double*, double*, double*, double*);
+  void interpolate_meam(int);
+
+public:
+  //-----------------------------------------------------------------------------
+  // convert lattice spec to lattice_t
+  // only use single-element lattices if single=true
+  // return false on failure
+  // return true and set lat on success
+  static bool str_to_lat(const char* str, bool single, lattice_t& lat)
+  {
+    if (strcmp(str,"fcc") == 0) lat = FCC;
+    else if (strcmp(str,"bcc") == 0) lat = BCC;
+    else if (strcmp(str,"hcp") == 0) lat = HCP;
+    else if (strcmp(str,"dim") == 0) lat = DIM;
+    else if (strcmp(str,"dia") == 0) lat = DIA;
+    else if (strcmp(str,"dia3") == 0) lat = DIA3;
+    else if (strcmp(str,"lin") == 0) lat = LIN;
+    else if (strcmp(str,"zig") == 0) lat = ZIG;
+    else if (strcmp(str,"tri") == 0) lat = TRI;
+    else {
+      if (single)
+        return false;
+
+      if (strcmp(str,"b1")  == 0) lat = B1;
+      else if (strcmp(str,"c11") == 0) lat = C11;
+      else if (strcmp(str,"l12") == 0) lat = L12;
+      else if (strcmp(str,"b2")  == 0) lat = B2;
+      else if (strcmp(str,"ch4")  == 0) lat = CH4;
+      else if (strcmp(str,"lin")  == 0) lat =LIN;
+      else if (strcmp(str,"zig")  == 0) lat = ZIG;
+      else if (strcmp(str,"tri")  == 0) lat = TRI;
+      else return false;
+    }
+    return true;
+  }
+
+  static int get_Zij(const lattice_t latt);
+  void meam_setup_global(int nelt, lattice_t* lat, int *ielement, double *atwt, double *alpha,
+      double *b0, double *b1, double *b2, double *b3, double *alat, double *esub,
+      double *asub, double *t0, double *t1, double *t2, double *t3, double *rozero,
+      int *ibar);
+  void meam_setup_param(int which, double value, int nindex, int *index /*index(3)*/, int *errorflag);
+  void meam_setup_done(double *cutmax);
+  void meam_dens_setup(int atom_nmax, int elem_nmax, int atom_nall, int elem_nall, int n_neigh);
+  void meam_dens_init(int i, int iintg, int inode, int *fmap,
+      int numneigha_half, int *firstneigha_half, 
+      int numneigha_full, int *firstneigha_full, 
+      int numneighia_half, int *firstneighia_half, int *firstneighia_index_half, 
+      int numneighia_full, int *firstneighia_full, int *firstneighia_index_full, 
+      int fnoffset);
+  void meam_dens_final(int eflag_either, int eflag_global, int eflag_atom, double *eng_vdwl,
+      double *eatom, double **enode, int *fmap, double **scale, int &errorflag);
+  void meam_force(int i, int iintg, int inode, int eflag_either, int eflag_global, int eflag_atom,
+      int vflag_either, int vflag_global, int vflag_atom, double *virial,
+      double *eng_vdwl, double *eatom, double **enode, int *fmap, double **scale, 
+      int numneigha_half, int *firstneigha_half, 
+      int numneigha_full, int *firstneigha_full, 
+      int numneighia_half, int *firstneighia_half, int *firstneighia_index_half, 
+      int numneighia_full, int *firstneighia_full, int *firstneighia_index_full, 
+      //int numneigha_outer, int *firstneigha_outer,
+      //int numneighia_outer, int *firstneighia_outer, int *firstneighia_index_outer, 
+      int *numneighnia2ia, int **firstneighnia2ia, int **firstneighnia2ia_index, 
+      int *numneighnia2a, int **firstneighnia2a, int **ia2nialist,
+      int fnoffset, double **vatom, double ***vnode, double ***intgf);
+  void meam_force_extra(int i, int iintg, int vflag_atom, double **scale, double *fmap);
+};
+
+
+// Functions we need for compat
+
+static inline bool iszero(const double f) {
+  return fabs(f) < 1e-20;
+}
+
+static inline bool isone(const double f) {
+  return fabs(f-1.0) < 1e-20;
+}
+
+// Helper functions
+
+static inline double fdiv_zero(const double n, const double d) {
+  if (iszero(d))
+    return 0.0;
+  return n / d;
+}
+
+}
+#endif

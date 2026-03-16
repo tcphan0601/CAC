@@ -1,0 +1,543 @@
+#include <mpi.h>
+#include <ctype.h>
+#include <float.h>
+#include <limits.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "pair.h"
+#include "atom.h"
+#include "element.h"
+#include "neighbor.h"
+#include "neigh_list.h"
+#include "domain.h"
+#include "comm.h"
+#include "force.h"
+#include "atom_masks.h"
+#include "memory.h"
+#include "error.h"
+#include "update.h"
+#include "math_const.h"
+
+using namespace CAC_NS;
+using namespace MathConst;
+
+//enum{NONE, RLINEAR, RSQ, BMP};
+
+// allocate space for static class instance variable and initialize it
+int Pair::instance_total = 0;
+
+/*  ----------------------------------------------------------------------  */
+
+Pair::Pair(CAC *cac) : Pointers(cac)
+{
+  instance_me = instance_total++;
+  
+  eng_vdwl = eng_coul = 0.0;
+
+  comm_atom_forward = comm_elem_forward = comm_atom_reverse = comm_elem_reverse = comm_atom_reverse_off = comm_elem_reverse_off = 0;
+
+  single_enable = 1;
+  restartinfo = 1;
+  respa_enable = 0;
+  one_coeff = 0;
+  no_virial_fdotr_compute = 0;
+  writedata = 0;
+  ghostneigh = 0;
+
+  nextra = 0;
+  pvector = NULL;
+  single_extra = 0;
+  svector = NULL;
+
+  ewaldflag = pppmflag = msmflag = dispersionflag = tip4pflag = dipoleflag = 0;
+  reinitflag = 1;
+
+  // pair_modify settingsx
+  
+  compute_flag = 1;
+  manybody_flag = 0;
+  threebody_flag = 0;
+  offset_flag = 0;
+  mix_flag = GEOMETRIC;
+  tail_flag = 0;
+  etail = ptail = etail_ij = ptail_ij = 0.0;
+  ncoultablebits = 12;
+  ndisptablebits = 12;
+  tabinner = sqrt(2.0);
+  tabinner_disp = sqrt(2.0);
+
+  allocated = 0;
+//  suffix_flag = Suffix::NONE;
+
+  maxeatom = maxvatom = 0;
+  maxeelem = maxvelem = 0;
+  eatom = NULL;
+  vatom = NULL;
+  enode = NULL;
+  vnode = NULL;
+
+  datamask = ALL_MASK;
+  datamask_ext = ALL_MASK;
+
+//  execution_space = Host;
+//  datamask_read = ALL_MASK;
+//  datamask_modify = ALL_MASK;
+
+  copymode = 0;
+  dvalue = 0;
+
+  // debug variables
+
+  debug_mode = 0;
+}
+
+Pair::~Pair()
+{
+  if (copymode) return;
+  memory->destroy(eatom);
+  memory->destroy(vatom);
+  memory->destroy(enode);
+  memory->destroy(vnode);
+}
+
+/*  ----------------------------------------------------------------------  */
+
+void Pair::init()
+{
+  int i, j;
+
+  if (offset_flag && tail_flag)
+    error->all(FLERR, "Cannot have both pair_modify shift and tail set to yes");
+  if (tail_flag && domain->dimension == 2)
+    error->all(FLERR, "Cannot use pair tail corrections with 2d simulations");
+  if (tail_flag && domain->nonperiodic && comm->me == 0)
+    error->warning(FLERR, "Using pair tail corrections with nonperiodic system");
+  if (!compute_flag && tail_flag)
+    error->warning(FLERR, "Using pair tail corrections with compute set to no");
+  if (!compute_flag && offset_flag)
+    error->warning(FLERR, "Using pair potential shift with compute set to no");
+
+  // for manybody potentials
+  // check if bonded exclusions could invalidate the neighbor list
+
+  // I, I coeffs must be set\
+  // init_one() will check if I, J is set explicitly or inferred by mixing
+
+  if (!allocated) error->all(FLERR, "All pair coeffs are not set");
+
+  for (i = 1; i <= atom->ntypes; i++)
+    if (setflag[i][i] == 0) error->all(FLERR, "All pair coeffs are not set");
+
+  // style-specific initialization
+
+  init_style();
+ 
+  // call init_one() for each I, J
+  // set cutsq for each I, J, used to neighbor
+  // cutforce = max of all I, J cutoffs
+
+  cutforce = 0.0;
+  etail = ptail = 0.0;
+  double cut;
+
+  for (i = 1; i <= atom->ntypes; i++)
+    for (j = i; j <= atom->ntypes; j++) {
+      cut = init_one(i, j);
+      cutsq[i][j] = cutsq[j][i] = cut * cut;
+      cutforce = MAX(cutforce, cut);
+      if (tail_flag) {
+        etail += etail_ij;
+        ptail += ptail_ij;
+        if (i != j) {
+          etail += etail_ij;
+          ptail += ptail_ij;
+        }
+      }
+  }
+
+
+}
+
+/*  ----------------------------------------------------------------------
+   init specific to a pair style
+   specific pair style can override this function
+     if needs its own error checks
+     if needs another kind of neighbor list
+   request default neighbor list = half list
+-------------------------------------------------------------------------  */
+
+void Pair::init_style()
+{
+  neighbor->request(this, instance_me);
+}
+
+/*  ----------------------------------------------------------------------
+    mixing of pair potential prefactors (epsilon)
+-------------------------------------------------------------------------  */
+
+double Pair::mix_energy(double eps1, double eps2, double sig1, double sig2)
+{
+  if (mix_flag == GEOMETRIC)
+    return sqrt(eps1 * eps2);
+  else if (mix_flag == ARITHMETIC)
+    return sqrt(eps1 * eps2);
+  else if (mix_flag == SIXTHPOWER)
+    return (2.0 * sqrt(eps1 * eps2) *
+      pow(sig1, 3.0) * pow(sig2, 3.0) / (pow(sig1, 6.0) + pow(sig2, 6.0)));
+  else return 0.0;
+}
+
+/*  ----------------------------------------------------------------------
+   mixing of pair potential distances (sigma, cutoff)
+-------------------------------------------------------------------------  */
+
+double Pair::mix_distance(double sig1, double sig2)
+{
+  if (mix_flag == GEOMETRIC)
+    return sqrt(sig1 * sig2);
+  else if (mix_flag == ARITHMETIC)
+    return (0.5 * (sig1+sig2));
+  else if (mix_flag == SIXTHPOWER)
+    return pow((0.5 * (pow(sig1, 6.0) + pow(sig2, 6.0))), 1.0/6.0);
+  else return 0.0;
+}
+
+/*  ----------------------------------------------------------------------
+   neighbor callback to inform pair style of neighbor list to use
+   specific pair style can override this function
+-------------------------------------------------------------------------  */
+
+void Pair::init_list(int which, NeighList *ptr)
+{
+  list = ptr;
+}
+
+/*  ----------------------------------------------------------------------  */
+
+void Pair::compute_dummy(int eflag, int vflag, int mflag)
+{
+  ev_init(eflag, vflag, mflag);
+}
+
+/*  ----------------------------------------------------------------------  */
+
+double Pair::memory_usage()
+{
+  int maxnpe = element->maxnpe;
+  int n = comm->nthreads;
+  double bytes = n * maxeatom * sizeof(double);
+  bytes += n * maxvatom * 6 * sizeof(double);
+  bytes += n * maxeelem * maxnpe * sizeof(double);
+  bytes += n * maxvelem * maxnpe * 6 * sizeof(double);
+  return bytes;
+}
+/*  ----------------------------------------------------------------------
+   setup for energy, virial computation
+   see integrate::ev_set() for values of eflag (0-3) and vflag (0-6)
+-------------------------------------------------------------------------  */
+
+void Pair::ev_setup(int eflag, int vflag, int mflag, int alloc)
+{
+  int maxnpe = element->maxnpe;
+  int maxapc = element->maxapc;
+  int i, j, k, l, n;
+
+  evflag = 1;
+
+  eflag_either = eflag;
+  eflag_global = eflag % 2;
+  eflag_atom = eflag / 2;
+
+  vflag_either = vflag;
+  vflag_global = vflag % 4;
+  vflag_atom = vflag / 4;
+
+  mflag_atom = mflag;
+
+  // reallocate per-atom/per-node arrays if necessary
+
+  if (eflag_atom) {
+    if (atom->nmax > maxeatom) {
+      maxeatom = atom->nmax;
+      if (alloc) {
+        memory->destroy(eatom);
+        memory->create(eatom, comm->nthreads * maxeatom, "pair:eatom");
+      }
+    }
+    if (element->nmax > maxeelem) {
+      maxeelem = element->nmax;
+      if (alloc) {
+        memory->destroy(enode);
+        memory->create(enode, comm->nthreads * maxeelem, maxapc, maxnpe, "pair:enode");
+      }
+    }
+  }
+
+  if (vflag_atom) {
+    if (atom->nmax > maxvatom) {
+      maxvatom = atom->nmax;
+      if (alloc) {
+        memory->destroy(vatom);
+        memory->create(vatom, comm->nthreads * maxvatom, 6, "pair:vatom");
+      }
+    }
+    if (element->nmax > maxvelem) {
+      maxvelem = element->nmax;
+      if (alloc) {
+        memory->destroy(vnode);
+        memory->create(vnode, comm->nthreads * maxvelem, maxapc, maxnpe, 6, "pair:vnode");
+      }
+    }
+  }
+
+  if (vflag_atom) {
+    if (atom->nmax > maxmatom) {
+      maxmatom = atom->nmax;
+      if (alloc) {
+        memory->destroy(matom);
+        memory->create(matom, comm->nthreads * maxmatom, 18, "pair:matom");
+      }
+    }
+    if (element->nmax > maxmelem) {
+      maxmelem = element->nmax;
+      if (alloc) {
+        memory->destroy(mnode);
+        memory->create(mnode, comm->nthreads * maxmelem, maxapc, maxnpe, 18, "pair:mnode");
+      }
+    }
+  }
+
+
+  // zero accumulators
+  // use force->newton instead of newton_pair
+  //   b/c some bonds/dihedrals call pair::ev_tally with pairwise info
+
+  if (eflag_global) eng_vdwl = eng_coul = 0.0;
+  if (vflag_global) for (i = 0; i < 6; i++) virial[i] = 0.0;
+  if (eflag_atom && alloc) {
+    n = atom->nlocal;
+    if (force->newton) n += atom->nghost;
+    for (i = 0; i < n; i++) eatom[i] = 0.0;
+    n = element->nlocal;
+    if (force->newton) n += element->nghost;
+    for (i = 0; i < n; i++) 
+      for (j = 0; j < maxapc; j++) 
+        for (k = 0; k < maxnpe; k++) 
+          enode[i][j][k] = 0.0;
+  }
+  if (vflag_atom && alloc) {
+    n = atom->nlocal;
+    if (force->newton) n += atom->nghost;
+    for (i = 0; i < n; i++) 
+      for (j = 0; j < 6; j++)
+        vatom[i][j] = 0.0;
+
+    n = element->nlocal;
+    if (force->newton) n += element->nghost;
+    for (i = 0; i < n; i++) 
+      for (j = 0; j < maxapc; j++) 
+        for (k = 0; k < maxnpe; k++) 
+          for (l = 0; l < 6; l++)
+            vnode[i][j][k][l] = 0.0;
+
+  }
+  if (mflag_atom && alloc) {
+    n = atom->nlocal;
+    if (force->newton) n += atom->nghost;
+    for (i = 0; i < n; i++) 
+      for (j = 0; j < 18; j++)
+        matom[i][j] = 0.0;
+
+    n = element->nlocal;
+    if (force->newton) n += element->nghost;
+    for (i = 0; i < n; i++) 
+      for (j = 0; j < maxapc; j++) 
+        for (k = 0; k < maxnpe; k++) 
+          for (l = 0; l < 18; l++)
+            mnode[i][j][k][l] = 0.0;
+  }
+
+  // if vflag_global = 2 and no element in simulation and pair::compute() calls virial_fdotr_compute() 
+  // compute global virial via (F dot r) instead of via pairwise summation
+  // unset other flags as appropriate
+
+  if (vflag_global == 2 && no_virial_fdotr_compute == 0 && element->nelements == 0) {
+    vflag_fdotr = 1;
+    vflag_global = 0;
+    if (vflag_atom == 0) vflag_either = 0;
+    if (vflag_either == 0 && eflag_either == 0) evflag = 0;
+  } else vflag_fdotr = 0;
+}
+
+/*  ----------------------------------------------------------------------
+    tally eng_vdwl and virial into global and per-atom accumulators 
+    i and j can be either atoms or nodes
+    check if jeptr/jvptr == NULL
+    -------------------------------------------------------------------------  */
+
+void Pair::ev_tally(double escale, double vscale, 
+    double *ieptr, double *jeptr, double *ivptr, double *jvptr,
+    double *imptr, double *jmptr,
+    double evdwl, double ecoul, double fpair, 
+    double delx, double dely, double delz)
+{
+  double epairhalf, v[6];
+
+  if (eflag_either) {
+    if (eflag_global) {
+      eng_vdwl += evdwl * escale;
+      eng_coul += ecoul * escale;
+    }
+    if (eflag_atom) {
+      epairhalf = 0.5 * (evdwl + ecoul);
+      if (ieptr != NULL) *ieptr += epairhalf;
+      if (jeptr != NULL) *jeptr += epairhalf;
+    }
+  }
+
+  if (vflag_either) {
+    v[0] = delx * delx * fpair;
+    v[1] = dely * dely * fpair;
+    v[2] = delz * delz * fpair;
+    v[3] = delx * dely * fpair;
+    v[4] = delx * delz * fpair;
+    v[5] = dely * delz * fpair;
+
+    if (vflag_global) {
+      virial[0] += v[0] * vscale;
+      virial[1] += v[1] * vscale;
+      virial[2] += v[2] * vscale;
+      virial[3] += v[3] * vscale;
+      virial[4] += v[4] * vscale;
+      virial[5] += v[5] * vscale;
+    }
+    if (vflag_atom) {
+      if (ivptr != NULL) {
+        ivptr[0] += 0.5 * v[0]; ivptr[1] += 0.5 * v[1];
+        ivptr[2] += 0.5 * v[2]; ivptr[3] += 0.5 * v[3];
+        ivptr[4] += 0.5 * v[4]; ivptr[5] += 0.5 * v[5];
+      }
+      if (jvptr != NULL) {
+        jvptr[0] += 0.5 * v[0]; jvptr[1] += 0.5 * v[1];
+        jvptr[2] += 0.5 * v[2]; jvptr[3] += 0.5 * v[3];
+        jvptr[4] += 0.5 * v[4]; jvptr[5] += 0.5 * v[5];
+      }
+    }
+  }
+}
+
+/*  ----------------------------------------------------------------------
+    tally eng_vdwl and virial into global and per-atom accumulators
+    called by SW potentials, newton_pair is always on
+    virial = riFi + rjFj + rkFk = (rj-ri) Fj + (rk-ri) Fk = drji * fj + drki * fk
+    -------------------------------------------------------------------------  */
+
+void Pair::ev_tally3(double escale, double vscale, double *ieptr, double *jeptr, 
+    double *ivptr, double *jvptr, double *keptr, double *kvptr, 
+    double evdwl, double ecoul, double *fj, double *fk, double *drji, double *drki)
+{
+  double epairthird, v[6];
+
+  if (eflag_either) {
+    if (eflag_global) {
+      eng_vdwl += evdwl * escale;
+      eng_coul += ecoul * escale;
+    }
+    if (eflag_atom) {
+      epairthird = THIRD * (evdwl + ecoul);
+      if (ieptr != NULL) *ieptr += epairthird;
+      if (jeptr != NULL) *jeptr += epairthird;
+      if (keptr != NULL) *keptr += epairthird;
+    }
+  }
+
+  if (vflag_either) {
+    v[0] = drji[0] * fj[0] + drki[0] * fk[0];
+    v[1] = drji[1] * fj[1] + drki[1] * fk[1];
+    v[2] = drji[2] * fj[2] + drki[2] * fk[2];
+    v[3] = drji[0] * fj[1] + drki[0] * fk[1];
+    v[4] = drji[0] * fj[2] + drki[0] * fk[2];
+    v[5] = drji[1] * fj[2] + drki[1] * fk[2];
+
+    if (vflag_global) {
+      virial[0] += v[0] * vscale;
+      virial[1] += v[1] * vscale;
+      virial[2] += v[2] * vscale;
+      virial[3] += v[3] * vscale;
+      virial[4] += v[4] * vscale;
+      virial[5] += v[5] * vscale;
+    }
+
+    if (vflag_atom) {
+      if (ivptr != NULL) {
+        ivptr[0] += THIRD * v[0]; ivptr[1] += THIRD * v[1];
+        ivptr[2] += THIRD * v[2]; ivptr[3] += THIRD * v[3];
+        ivptr[4] += THIRD * v[4]; ivptr[5] += THIRD * v[5];
+      }
+      if (jvptr != NULL) {
+        jvptr[0] += THIRD * v[0]; jvptr[1] += THIRD * v[1];
+        jvptr[2] += THIRD * v[2]; jvptr[3] += THIRD * v[3];
+        jvptr[4] += THIRD * v[4]; jvptr[5] += THIRD * v[5];
+      }
+      if (kvptr != NULL) {
+        kvptr[0] += THIRD * v[0]; kvptr[1] += THIRD * v[1];
+        kvptr[2] += THIRD * v[2]; kvptr[3] += THIRD * v[3];
+        kvptr[4] += THIRD * v[4]; kvptr[5] += THIRD * v[5];
+      }
+    }
+  }
+}
+
+
+/*  ----------------------------------------------------------------------
+    compute global pair virial via summing F dot r over own & ghost atoms
+    at this point, only pairwise forces have been accumulated in atom->f
+    only called when no element in simulation
+    -------------------------------------------------------------------------  */
+
+void Pair::virial_fdotr_compute()
+{
+  double **x = atom->x;
+  double **f = atom->f;
+
+  // sum over force on all particles including ghosts
+
+  int nall = atom->nlocal + atom->nghost;
+  for (int i = 0; i < nall; i++) {
+    virial[0] += f[i][0] * x[i][0];
+    virial[1] += f[i][1] * x[i][1];
+    virial[2] += f[i][2] * x[i][2];
+    virial[3] += f[i][1] * x[i][0];
+    virial[4] += f[i][2] * x[i][0];
+    virial[5] += f[i][2] * x[i][1];
+  }
+
+  // prevent multiple calls to update the virial
+  // when a hybrid pair style uses both a gpu and non-gpu pair style
+  // or when respa is used with gpu pair styles
+
+  vflag_fdotr = 0;
+}
+
+/*  ----------------------------------------------------------------------
+    set all flags to zero for energy, virial computation
+    called by some complicated many-body potentials that use individual flags
+    to insure no holdover of flags from previous timestep
+    -------------------------------------------------------------------------  */
+
+void Pair::ev_unset()
+{
+  evflag = 0;
+
+  eflag_either = 0;
+  eflag_global = 0;
+  eflag_atom = 0;
+
+  vflag_either = 0;
+  vflag_global = 0;
+  vflag_atom = 0;
+  vflag_fdotr = 0;
+}
+

@@ -1,0 +1,259 @@
+#ifndef CAC_ELEMENT_H
+#define CAC_ELEMENT_H
+
+#include "pointers.h"
+#include <map>
+#include <string>
+
+
+namespace CAC_NS {
+
+class Element : protected Pointers {
+ public: 
+  char *element_style;
+  char **element_shape_list;  // list of available element shapes
+
+  double ***mass_matrices;             // list of consistent mass matrices for each element shape
+  double ***inversed_mass_matrices;    // list of inversed consistent mass matrices for each element shape
+  int ***surface_node_list;   // list of nodes for each surface of element
+  int **surface_num_node;     // number of node on each element surface
+  int mass_style;             // 0 = lumped mass matrix
+                              // 1 = consistent mass matrix
+  int num_element_shapes;     // number of available element shapes
+  int inner_rigid_flag;       // whether inner integration points feel force from atoms
+  class ElementVec *evec;
+
+  enum{QUADRILATERAL,TRIANGLE,HEXAHEDRON,TETRAHEDRON,OCTAHEDRON,PYRAMID,WEDGE};
+  enum{LUMPED,CONSISTENT};
+
+  // element counts
+  
+  bigint nelements;
+  bigint nclusters;
+  int nlocal,nghost;     // number of local elements and ghost elements
+  int netypes;           // number of element types
+
+  // element data & per-element arrays
+  
+  double **x;           // element center position
+  tagint *tag;
+  int    *ctype;        // chemical type of elements (for pair force calculation)
+  int    *etype;        // type of elements (for shape and interpolation)
+  int    *mask;
+  int    *nsurface;     // number of surfaces for each element type
+  int    *nedge;        // number of edges for each element type
+  int    *element_shape_ids;     // ids of element shape for each element type
+  char   **element_shape_names;  // names of element shape for each element type
+  tagint **element_clusters;     // list of element tags in group with this element (for use in dump_tec_plot with multiple atom per unit cell case)
+  int    element_cluster_flag;   // if there are elements with multiple atoms per unit cell
+                                 // there are 2 flags for multiple atoms per unit cell case: 
+                                 // 1. max_apc > 1 means system allow multiple atoms per unit cell, not necessary having element types with multiple atoms per unit cell
+                                 // 2. element_cluster_flag == 1 means max_apc > 1 and there are element types with apc > 1
+
+  imageint *image;
+  double *subelem_size;    // size of each element diagonally
+  double **initial_box_size; // initial size of each of element
+                             // for triclinic box, box size is measured in lamda coords
+
+  double **cell_size;   // size of elements along each local axes
+  double ***slip_plane; // unit vectors of local axes in global coordinates
+
+  // element bound box
+  // orthogonal: in box coords
+  // triclinic: in lamda coords
+  
+  double max_element_bound_box_size[3];  // maximum element bound box size locally (for ghost cutoff and element bins)
+  double local_element_bound_box[6];     // local bound box for all my local elements (for ghost cutoff)
+  double **element_bound_box;    // bounding box for each element
+                                 // 0,1,2 = x y z lower bound
+                                 // 3,4,5 = x y z upper bound
+  double max_diag_size;  // maximum element diagonal size (for neighboring)
+  int nmax;              // maximum # of owned+ghost elements that the allocated array can store
+  int tag_enable;        // 0/1 if element ID tags are defined
+  int map_style;         // style of element map: 0 = none, 1 = array, 2 = hash
+  int map_user;          // user selected style = same 0,1,2
+  tagint map_tag_max;
+  int *sametag;
+
+  // node data & per-node arrays
+
+  bigint nnodes; 
+  double ***nodex, ***nodev, ***nodef;
+  tagint **nodetag;       // use only for node connectivity in .dat file for tecplot visualization
+  int **nodemask;
+  int **n2ia;             // mapping from node index to interpolation point index in element
+  int **n2i;              // mapping from node index to integration point index in element
+  int max_npe;            // maximum number of nodes for each element;
+  int *npe;               // number of nodes per element for each element type
+  int max_apc;            // maximum number of atoms per unit cell
+  int *apc;               // number of atoms per unit cells for each element type
+  double *nodal_weight;   // nodal weight for each element type
+
+  // interpolated atoms data & per-intpl arrays
+
+  bigint nintpls;
+  int max_nintpl;                 // store the max # of interpolation points in all types of element
+  double ***shape_array;          // shape function inside each type of elements for all interpolated atoms
+  int *nintpl;                    // number of interpolated atoms in an element for each type of element
+  int ***surface_intpl;           // indices of interpolated atoms on the surfaces for each type of element
+  int **nsurface_intpl;           // number of interpolated atoms on the surfaces for each type of element
+  int max_surface_intpl;          // max number of interpolated atoms on a surface
+  int max_surface;                // max number of surfaces on an element
+  int ***edge_intpl;              // indices of interpolated atoms on the edges for each type of element
+  int **nedge_intpl;              // number of interpolated atoms on the edges for each type of element
+  int max_edge_intpl;             // max number of interpolated atoms on an edge
+  int max_edge;                   // max number of edges on an element
+
+  bigint nmaxintpl;               // maximum # of owned+ghost interpolated atoms
+
+  // integration points data & per-intg arrays
+
+  double **weight;           // weight of each integration point
+  double ***weighted_shape_array; // weighted shape array for force distribution from integration points to nodes.
+  int **i2ia;                // mapping from integration point index to interpolated atom index in element
+  int **ia2i;                // mapping from interpolated atom index to intergration point index in element 
+                             // -1 if not an integration point
+  int **i2n;                 // mapping from integration point index to node index in element
+                             // -1 if not a node
+  int **is_inner;            // 1 if integration point is inner
+                             // 0 otherwise
+  int max_nintg;             // store the max # of integration points in all types of element
+  int *nintg;                // number of integration points in an element for each type of element
+  int nmaxintg;              // maximum # of owned+ghost integration points
+  double **wgauss,**xgauss;
+
+  // sub-element data & per-sub-element arrays
+
+  int **natom_subelem;                    // # of interpolated atoms inside the sub element
+  int *subsplit;                          // sub element split division for each element type
+  double subelem_size_factor;             // scale up factor for subelem size to account for element large deformation error
+  int min_split_size;                     // minimum number of atoms along each split direction
+  int *nsubelem;                          // number of sub-elements in each element type
+  double ***shape_array_center_subelem;   // shape function of the center of the sub elements for each type
+  int ***ias2ia;                          // mapping from interpolated atom index in sub element to index in element
+
+  // maximum data for each element
+
+  int maxintpl;
+  int maxintg;
+  int maxsubelem;
+  int maxsubintpl;
+  double maxelemchange;
+  
+  // extra peratom info in restart file destined for fix & diag
+
+  double **extra;
+
+
+  // callback ptrs for atom arrays managed by fix classes
+  // list of fixes to call during exchange, border, or restart
+
+  int nextra_grow,nextra_restart,nextra_border;  // # of callbacks of each type
+  int *extra_grow,*extra_restart,*extra_border;  // index of fix to callback to
+  int nextra_grow_max,nextra_restart_max;        // size of callback lists
+  int nextra_border_max;
+  int nextra_store;
+
+  // ElementVec factory types and map
+
+  typedef ElementVec *(*ElementVecCreator)(CAC *);
+  typedef std::map<std::string,ElementVecCreator> ElementVecCreatorMap;
+  ElementVecCreatorMap *evec_map;
+ 
+  // functions
+
+  Element(class CAC *);
+  ~Element();
+
+  void add_callback(int);
+  void delete_callback(const char *, int);
+  void update_callback(int);
+
+  void create_evec(const char *, int, char **);
+  class ElementVec *new_evec(const char *);
+
+  void init();
+  void setup() {}
+  void grow(int);
+  void tag_check();
+  void check_element_clusters();
+  void update_subelem_size();
+  void update_element_bound_box(int check = 0);
+  void tag_extend();
+  int find_element_shape_id(char *);
+
+  void data_elements(int, char *, tagint, int, int, int, double *);
+  void data_element_clusters(int, char *, tagint);
+  void data_nodes(int, char *, tagint, int, double *);
+  void data_vels(int, char *, tagint);
+  void data_fix_compute_variable(int, int);
+  void data_pass_on_fix_compute_variable(int, int, int *);
+  int pack_exchange(int, double *);
+  int unpack_exchange(double *);
+  int pack_comm(int, int *, double *, int, int *);
+  void unpack_comm(int, int, double *);
+  int pack_border(int, int *, double *, int, int *);
+  void unpack_border(int, int, double *);
+  void modify_params(int, char **);
+  void modify_elements(int, char **);
+  void add_etype(int, char **);
+  int element2atom(int); 
+  void reset_node_tags(int, int);
+  void check_node_coords(int);
+  bigint count_intpl();
+  int count_nodes(int);
+  int count_element_clusters();
+
+  bigint memory_usage();
+  int memcheck(const char *);
+
+  // map functions
+
+  inline int map(tagint global) {
+    if (map_style == 1) return map_array[global];
+    else if (map_style == 2) return map_find_hash(global);
+    else return -1;
+  };
+
+  void map_init(int check = 1);
+  void map_clear();
+  void map_set();
+  void map_one(tagint, int);
+  int map_style_set();
+  void map_delete();
+  int map_find_hash(tagint);
+
+ protected:
+
+  // per-element arrays
+
+  int *map_array;
+  int map_maxarray;
+
+  struct HashElem {     // hashed map
+    tagint global;      // key to search on = global ID
+    int local;          // value associated with key = local index
+    int next;           // next entry in this bucket, -1 if last
+  };    
+  int map_nhash;
+  int map_nused;
+  int map_free;
+  int map_nbucket;
+  int *map_bucket;
+  HashElem *map_hash;
+
+  int max_same;
+ 
+  int memlength;                  // allocated size of memstr
+  char *memstr;                   // string of array names already counted
+
+ private:
+  template <typename T> static ElementVec *evec_creator(CAC *);
+  void define_mass_matrices();
+  void define_inversed_mass_matrices();
+  void define_surface_node_list();
+
+};
+};
+
+#endif

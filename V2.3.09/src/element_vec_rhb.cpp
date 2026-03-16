@@ -1,0 +1,3093 @@
+#include <stdlib.h>
+#include <string.h>
+#include "element_vec_rhb.h"
+#include "element.h"
+#include "atom.h"
+#include "atom_vec.h"
+#include "comm.h"
+#include "domain.h"
+#include "lattice.h"
+#include "memory.h"
+#include "modify.h"
+#include "fix.h"
+#include "group.h"
+#include "error.h"
+#include "math_extra.h"
+#include "universe.h"
+
+using namespace CAC_NS;
+using namespace MathExtra;
+
+#define EPSILON 1e-6
+#define BIG     1e30
+#define MAXSUB  5
+
+/*----------------------------------------------------------------*/
+
+ElementVecRHB::ElementVecRHB(CAC *cac) : ElementVec(cac)
+{
+  if (domain->dimension == 3) {
+    npe = 8;
+    element->nsurface = 6;
+    element->nedge = 12;
+  } else {
+    npe = 4;
+    element->nsurface = 0;
+    element->nedge = 4;
+  }
+  element->npe = npe;
+
+  apc = element->apc;
+  naae = niae = NULL;
+  intg = NULL;
+
+  // size of data line in write_data_elem command
+
+  size_data_elem = 5;
+  size_data_elem_vel = 5;
+
+  // size of data line in write_data command
+
+  size_data_element = 6;
+  size_data_node = 6;
+  size_data_vel = 5;
+
+  // position of first x column in read_data
+
+  xcol_data = 4;
+
+  // size of data line in write_dat command
+
+  size_dat_node = 3;
+  size_dat_node_connect = npe;
+
+  // size of communication
+
+  size_velocity = 3*npe;
+  size_forward = 3*(npe+1);
+  size_reverse = 3*npe;
+  size_border = 7 + 5*npe;
+
+
+  nrequested_etype = 0;
+  maxrequested_etype = 4;
+  memory->create(requested_etype,4*6,"evec:requested_etype");
+
+  node_set_3D[0][0][0] = 0;
+  node_set_3D[0][0][1] = 3;
+  node_set_3D[0][0][2] = 7;
+  node_set_3D[0][0][3] = 4;
+  node_set_3D[0][1][0] = 1;
+  node_set_3D[0][1][1] = 2;
+  node_set_3D[0][1][2] = 6;
+  node_set_3D[0][1][3] = 5;
+
+  node_set_3D[1][0][0] = 0;
+  node_set_3D[1][0][1] = 1;
+  node_set_3D[1][0][2] = 5;
+  node_set_3D[1][0][3] = 4;
+  node_set_3D[1][1][0] = 3;
+  node_set_3D[1][1][1] = 2;
+  node_set_3D[1][1][2] = 6;
+  node_set_3D[1][1][3] = 8;
+
+  node_set_3D[2][0][0] = 0;
+  node_set_3D[2][0][1] = 1;
+  node_set_3D[2][0][2] = 2;
+  node_set_3D[2][0][3] = 3;
+  node_set_3D[2][1][0] = 4;
+  node_set_3D[2][1][1] = 5;
+  node_set_3D[2][1][2] = 6;
+  node_set_3D[2][1][3] = 7;
+
+  node_set_2D[0][0][0] = 0;
+  node_set_2D[0][0][1] = 3;
+  node_set_2D[0][1][0] = 1;
+  node_set_2D[0][1][1] = 2;
+
+  node_set_2D[1][0][0] = 0;
+  node_set_2D[1][0][1] = 1;
+  node_set_2D[1][1][0] = 3;
+  node_set_2D[1][1][1] = 2;
+
+}
+
+/*----------------------------------------------------------------*/
+
+ElementVecRHB::~ElementVecRHB()
+{
+  memory->destroy(naae);
+  memory->destroy(niae);
+  memory->destroy(intg);
+  memory->destroy(requested_etype);
+}
+
+/*----------------------------------------------------------------*/
+
+void ElementVecRHB::update_npe()
+{
+  if (domain->dimension == 3) npe = 8;
+  else npe = 4;
+  element->npe = npe;
+
+  size_dat_node_connect = npe;
+  size_velocity = 3*npe;
+  size_forward = 3*(npe+1);
+  size_reverse = 3*npe;
+  size_border = 7 + 5*npe;
+}
+
+/*----------------------------------------------------------------*/
+
+void ElementVecRHB::check_type()
+{
+  // check if every element has defined interpolate and integration
+
+  for (int i = 0; i < element->nlocal; i++) {
+    if (!interpolate_setflag[etype[i]]) 
+      error->all(FLERR,"Element interpolated atoms have not been set for all elements");
+    if (!integration_setflag[etype[i]]) 
+      error->all(FLERR,"Element integration points have not been set for all elements");
+  }
+}
+
+/* ----------------------------------------------------------------------
+   copy element I info to element J
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::copy(int i, int j, int delflag)
+{
+  tag[j] = tag[i];
+  ctype[j] = ctype[i];
+  etype[j] = etype[i];
+  mask[j] = mask[i];
+  image[j] = image[i];
+  initial_size[j] = initial_size[i];
+  x[j][0] = x[i][0];
+  x[j][1] = x[i][1];
+  x[j][2] = x[i][2];
+  for (int k = 0; k < npe; k++) {
+    nodemask[j][k] = nodemask[i][k];
+    nodetag[j][k] = nodetag[i][k];
+    nodex[j][k][0] = nodex[i][k][0];
+    nodex[j][k][1] = nodex[i][k][1];
+    nodex[j][k][2] = nodex[i][k][2];
+    nodev[j][k][0] = nodev[i][k][0];
+    nodev[j][k][1] = nodev[i][k][1];
+    nodev[j][k][2] = nodev[i][k][2];
+  }
+
+  if (element->nextra_grow)
+    for (int iextra = 0; iextra < element->nextra_grow; iextra++)
+      modify->fix[element->extra_grow[iextra]]->copy_elem_arrays(i,j,delflag);
+}
+
+/* ----------------------------------------------------------------------
+   grow atom arrays
+   n = 0 grows arrays by a chunk
+   n > 0 allocates arrays to size n
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::grow(int n)
+{
+  if (n == 0) grow_nmax();
+  else {
+    nmax = n;
+    element->nmaxintg = nmax * element->max_nintg;
+    element->nmaxintpl = nmax * element->max_nintpl;
+  }
+  element->nmax = nmax;
+
+  if (nmax < 0 || nmax > MAXSMALLINT)
+    error->one(FLERR,"Per-processor system is too big");
+
+  tag = memory->grow(element->tag,nmax,"element:tag");
+  ctype = memory->grow(element->ctype,nmax,"element:ctype");
+  etype = memory->grow(element->etype,nmax,"element:etype");
+  mask = memory->grow(element->mask,nmax,"element:mask");
+  nodemask = memory->grow(element->nodemask,nmax,npe,"element:nodemask");
+  image = memory->grow(element->image,nmax,"element:image");
+  x = memory->grow(element->x,nmax,3,"element:x");
+  slip_plane = memory->grow(element->slip_plane,nmax,3,3,"element:slip_plane");
+  cell_size = memory->grow(element->cell_size,nmax,3,"element:cell_size");
+  nodex = memory->grow(element->nodex,nmax,npe,3,"element:nodex");
+  nodev = memory->grow(element->nodev,nmax,npe,3,"element:nodev");
+  nodef = memory->grow(element->nodef,nmax,npe,3,"element:nodef");
+  nodetag = memory->grow(element->nodetag,nmax,npe,"element:nodetag");
+  elem_size = memory->grow(element->elem_size,nmax,"element:elem_size");
+  initial_size = memory->grow(element->initial_size,nmax,"element:initial_size");
+
+  if (element->nextra_grow)
+    for (int iextra = 0; iextra < element->nextra_grow; iextra++)
+      modify->fix[element->extra_grow[iextra]]->grow_elem_arrays(nmax);
+
+}
+
+/* ---------------------------------------------------------
+   grow etype arrays to n types
+ * ------------------------------------------------------*/
+
+void ElementVecRHB::grow_etype_arrays(int n)
+{
+  int old_netypes = element->netypes;
+  if (n <= old_netypes) return;
+  else element->netypes = n;
+
+  // grow style specific arrays
+  //
+  // grow integration point arrays
+
+  memory->grow(niae,n+1,3,"evec:niae");
+  memory->grow(intg,n+1,element->maxintg,3,"evec:intg");
+  memory->grow(integration_setflag,n+1,"evec:integration_setflag");
+
+  // interpolated atom arrays
+
+  memory->grow(naae,n+1,3,"element:naae");
+  memory->grow(interpolate_setflag,n+1,"element:interpolate_setflag");
+
+  // grow arrays common to all element styles
+
+  // grow integration point arrays
+
+  nintg = memory->grow(element->nintg,n+1,"element:nintg");
+  weighted_shape_array = memory->grow(element->weighted_shape_array,
+      n+1,element->maxintg,npe,"element:weighted_shape_array");
+  i2ia = memory->grow(element->i2ia,n+1,element->maxintg,"element:i2ia");
+  weight = memory->grow(element->weight,n+1,element->maxintg,"element:weight");
+  i2n = memory->grow(element->i2n,n+1,element->maxintg,"element:i2n");
+
+  // grow node arrays
+
+  n2i = memory->grow(element->n2i,n+1,npe,"element:n2i");
+  n2ia = memory->grow(element->n2ia,n+1,npe,"element:n2ia");
+
+  // interpolated atom arrays
+
+  nintpl = memory->grow(element->nintpl,n+1,"element:nintpl");
+  surface_intpl = memory->grow(element->surface_intpl,n+1,6,element->max_surface_intpl,"element:surface_intpl");
+  nsurface_intpl = memory->grow(element->nsurface_intpl,n+1,6,"element:nsurface_intpl");
+  edge_intpl = memory->grow(element->edge_intpl,n+1,12,element->max_edge_intpl,"element:edge_intpl");
+  nedge_intpl = memory->grow(element->nedge_intpl,n+1,12,"element:nedge_intpl");
+
+  shape_array = memory->grow(element->shape_array,n+1,element->maxintpl,npe,"element:shape_array");
+  ia2i = memory->grow(element->ia2i,n+1,element->maxintpl,"element:ia2i");
+
+  // sub-element array
+
+  natom_subelem = memory->grow(element->natom_subelem,n+1,element->maxsubelem,"element:natom_subelem");
+  ias2ia = memory->grow(element->ias2ia,n+1,element->maxsubelem,element->maxsubintpl,"element:ias2ia");
+
+  for (int itype = old_netypes + 1; itype <= n; itype++) {
+    interpolate_setflag[itype] = 0;
+    integration_setflag[itype] = 0;
+    nintg[itype] = 0; 
+    nintpl[itype] = 0; 
+    for (int i = 0; i < element->maxintpl; i++) 
+      ia2i[itype][i] = -1;
+    for (int i = 0; i < element->maxintg; i++) {
+      i2ia[itype][i] = -1;
+      i2n[itype][i] = -1;
+    }
+    for (int i = 0; i < npe; i++)
+      n2i[itype][i] = -1;
+  }
+}
+
+/* ----------------------------------------------------------------------
+   unpack one line from Elements section of data file
+   initialize other element quantities
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::data_element(double *coord, imageint imagetmp, char **values)
+{
+  int nlocal = element->nlocal;
+  if (nlocal == nmax) grow(0);  
+  while ((nlocal+1) * element->max_nintg >= nmaxintg) grow_nmaxintg();
+  while ((nlocal+1) * element->max_nintpl >= nmaxintpl) grow_nmaxintpl();
+
+  tag[nlocal] = ATOTAGINT(values[0]);
+  etype[nlocal] = atoi(values[1]);
+  if (tag[nlocal] <= 0)
+    error->one(FLERR,"Invalid element ID in Elements section of data file");
+  if (etype[nlocal] <= 0 || etype[nlocal] > element->netypes)
+    error->one(FLERR,"Invalid element type in Elements section of data file"); 
+
+  ctype[nlocal] = atoi(values[2]);
+  if (ctype[nlocal] <= 0 || ctype[nlocal] > atom->ntypes)
+    error->one(FLERR,"Invalid atom type in Elements section of data file"); 
+  image[nlocal] = imagetmp;
+
+  // 1 equal to the all group, 2 equal to the element group
+
+  mask[nlocal] = 1|2;
+
+  x[nlocal][0] = coord[0];
+  x[nlocal][1] = coord[1];
+  x[nlocal][2] = coord[2];
+
+  initial_size[nlocal] = 0.0;
+  element->nintpls += nintpl[etype[nlocal]];
+  element->nlocal++;
+
+}
+
+/* ----------------------------------------------------------------------
+   unpack one line from Node Velocities section of data file
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::data_vel(int m, char **values)
+{
+
+  int i = atoi(values[0])-1; 
+
+  if (i >= npe) error->all(FLERR,"Invalid node index value in Node section of data file");
+  nodev[m][i][0] = atof(values[1]);
+  nodev[m][i][1] = atof(values[2]);
+  nodev[m][i][2] = atof(values[3]);
+}
+
+/* ----------------------------------------------------------------------
+   unpack one line from Node of data file
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::data_node(int m, char **values, int shiftflag, double *shift)
+{
+  int i = atoi(values[0])-1; 
+  if (i >= npe) error->all(FLERR,"Invalid node index value in Node section of data file");
+  nodex[m][i][0] = atof(values[1]);
+  nodex[m][i][1] = atof(values[2]);
+  nodex[m][i][2] = atof(values[3]);
+  if (shiftflag) {
+    nodex[m][i][0] += shift[0];
+    nodex[m][i][1] += shift[1];
+    nodex[m][i][2] += shift[2];
+  }
+  nodetag[m][i] = ATOTAGINT(values[4]);
+
+  // 1 equal to the all group, 2 equal to the element group
+
+  nodemask[m][i] = 1|2;
+  nodev[m][i][0] = 0.0;
+  nodev[m][i][1] = 0.0;
+  nodev[m][i][2] = 0.0;
+}
+
+/* ----------------------------------------------------------------------
+   pack data for element I for sending to another proc
+   ------------------------------------------------------------------------- */
+
+int ElementVecRHB::pack_exchange(int i, double *buf)
+{
+  int m = 1;
+  buf[m++] = x[i][0];
+  buf[m++] = x[i][1];
+  buf[m++] = x[i][2];
+  buf[m++] = initial_size[i];
+  buf[m++] = ubuf(tag[i]).d;
+  buf[m++] = ubuf(ctype[i]).d;
+  buf[m++] = ubuf(etype[i]).d;
+  buf[m++] = ubuf(mask[i]).d;
+  buf[m++] = ubuf(image[i]).d;
+  for (int j = 0; j < npe; j++) {
+    buf[m++] = ubuf(nodemask[i][j]).d;
+    buf[m++] = ubuf(nodetag[i][j]).d;
+    buf[m++] = nodex[i][j][0];
+    buf[m++] = nodex[i][j][1];
+    buf[m++] = nodex[i][j][2];
+    buf[m++] = nodev[i][j][0];
+    buf[m++] = nodev[i][j][1];
+    buf[m++] = nodev[i][j][2];
+  }
+
+  if (element->nextra_grow)
+    for (int iextra = 0; iextra < element->nextra_grow; iextra++)
+      m += modify->fix[element->extra_grow[iextra]]->pack_elem_exchange(i,&buf[m]);
+
+  buf[0] = m;
+  return m;
+}
+
+/* ---------------------------------------------------------------
+   unpack element from exchanged proc
+   -------------------------------------------------------------- */
+
+int ElementVecRHB::unpack_exchange(double *buf)
+{
+
+  // grow per-element arrays if needed
+
+  int nlocal = element->nlocal;
+  if (nlocal == nmax) grow(0);
+  while ((nlocal+1) * element->max_nintg >= nmaxintg) grow_nmaxintg();
+  while ((nlocal+1) * element->max_nintpl >= nmaxintpl) grow_nmaxintpl();
+
+  int m = 1;
+
+  // unpack
+
+  x[nlocal][0] = buf[m++];
+  x[nlocal][1] = buf[m++];
+  x[nlocal][2] = buf[m++];
+  initial_size[nlocal] = buf[m++];
+  tag[nlocal] = (tagint) ubuf(buf[m++]).i;
+  ctype[nlocal] = (int) ubuf(buf[m++]).i;
+  etype[nlocal] = (int) ubuf(buf[m++]).i;
+  mask[nlocal] = (int) ubuf(buf[m++]).i;
+  image[nlocal] = (imageint) ubuf(buf[m++]).i;
+  for (int j = 0; j < npe; j++) {
+    nodemask[nlocal][j] = (int) ubuf(buf[m++]).i;
+    nodetag[nlocal][j] = (tagint) ubuf(buf[m++]).i;
+    nodex[nlocal][j][0] = buf[m++];
+    nodex[nlocal][j][1] = buf[m++];
+    nodex[nlocal][j][2] = buf[m++];
+    nodev[nlocal][j][0] = buf[m++];
+    nodev[nlocal][j][1] = buf[m++];
+    nodev[nlocal][j][2] = buf[m++];
+  }
+
+  if (element->nextra_grow)
+    for (int iextra = 0; iextra < element->nextra_grow; iextra++)
+      m += modify->fix[element->extra_grow[iextra]]->
+        unpack_elem_exchange(nlocal,&buf[m]);
+
+  element->nlocal++;
+  return m;
+}
+
+/* ----------------------------------------------------------------------
+   pack data for elements in list for border exchange
+   ------------------------------------------------------------------------- */
+
+int ElementVecRHB::pack_border(int n, int *list, double *buf, int pbc_flag, int *pbc)
+{
+  int i,j,k,m;
+  double dx,dy,dz;
+
+  m = 0;
+
+  if (pbc_flag == 0) {
+    for (i = 0; i < n; i++) {
+      j = list[i];
+      buf[m++] = x[j][0];
+      buf[m++] = x[j][1];
+      buf[m++] = x[j][2];
+      buf[m++] = ubuf(tag[j]).d;
+      buf[m++] = ubuf(ctype[j]).d;
+      buf[m++] = ubuf(etype[j]).d;
+      buf[m++] = ubuf(mask[j]).d;
+      for (k = 0; k < npe; k++) {
+        buf[m++] = ubuf(nodemask[j][k]).d;
+        buf[m++] = ubuf(nodetag[j][k]).d;
+        buf[m++] = nodex[j][k][0];
+        buf[m++] = nodex[j][k][1];
+        buf[m++] = nodex[j][k][2];
+      }
+    }
+  } else {
+    if (domain->triclinic == 0) {
+      dx = pbc[0]*domain->xprd;
+      dy = pbc[1]*domain->yprd;
+      dz = pbc[2]*domain->zprd;
+    } else {
+      dx = pbc[0];
+      dy = pbc[1];
+      dz = pbc[2];
+    }
+    for (i = 0; i < n; i++) {
+      j = list[i];
+      buf[m++] = x[j][0] + dx;
+      buf[m++] = x[j][1] + dy;
+      buf[m++] = x[j][2] + dz;
+      buf[m++] = ubuf(tag[j]).d;
+      buf[m++] = ubuf(ctype[j]).d;
+      buf[m++] = ubuf(etype[j]).d;
+      buf[m++] = ubuf(mask[j]).d;
+      for (k = 0; k < npe; k++) {
+        buf[m++] = ubuf(nodemask[j][k]).d;
+        buf[m++] = ubuf(nodetag[j][k]).d;
+        buf[m++] = nodex[j][k][0]+dx;
+        buf[m++] = nodex[j][k][1]+dy;
+        buf[m++] = nodex[j][k][2]+dz;
+      }
+    }
+  }
+
+  if (element->nextra_border)
+    for (int iextra = 0; iextra < element->nextra_border; iextra++)
+      m += modify->fix[element->extra_border[iextra]]->pack_elem_border(n,list,&buf[m]);
+
+  return m;
+}
+
+/* ----------------------------------------------------------------------
+   unpack data for elements received from border exchange
+   ------------------------------------------------------------------------- */
+
+
+void ElementVecRHB::unpack_border(int n, int first, double *buf)
+{
+  int m,last;
+  m = 0;
+  last = first + n;
+  for (int i = first; i < last; i++) {
+    while (i >= nmax) grow(0);
+    while ((i+1) * element->max_nintg >= nmaxintg) grow_nmaxintg();
+    while ((i+1) * element->max_nintpl >= nmaxintpl) grow_nmaxintpl();
+    x[i][0] = buf[m++];
+    x[i][1] = buf[m++];
+    x[i][2] = buf[m++];
+    tag[i] = (tagint) ubuf(buf[m++]).i;
+    ctype[i] = (int) ubuf(buf[m++]).i;
+    etype[i] = (int) ubuf(buf[m++]).i;
+    mask[i] = (int) ubuf(buf[m++]).i;
+    for (int j = 0; j < npe; j++) {
+      nodemask[i][j] = (int) ubuf(buf[m++]).i;
+      nodetag[i][j] = (tagint) ubuf(buf[m++]).i;
+      nodex[i][j][0] = buf[m++];
+      nodex[i][j][1] = buf[m++];
+      nodex[i][j][2] = buf[m++];
+    }
+  }
+
+  if (element->nextra_border)
+    for (int iextra = 0; iextra < element->nextra_border; iextra++)
+      m += modify->fix[element->extra_border[iextra]]->
+        unpack_elem_border(n,first,&buf[m]);
+}
+
+/* ---------------------------------------------------------------------- */
+
+int ElementVecRHB::pack_comm(int n, int *list, double *buf, int pbc_flag, int *pbc)
+{
+  int i,j,k;
+  double dx,dy,dz;
+
+  int m = 0;
+
+  if (pbc_flag == 0) {
+    for (i = 0; i < n; i++) {
+      j = list[i];
+      buf[m++] = x[j][0];
+      buf[m++] = x[j][1];
+      buf[m++] = x[j][2];
+      for (k = 0; k < npe; k++) {
+        buf[m++] = nodex[j][k][0];
+        buf[m++] = nodex[j][k][1];
+        buf[m++] = nodex[j][k][2];
+      }
+    }
+  } else {
+    if (domain->triclinic == 0) {
+      dx = pbc[0]*domain->xprd;
+      dy = pbc[1]*domain->yprd;
+      dz = pbc[2]*domain->zprd;
+    } else {
+      dx = pbc[0]*domain->xprd + pbc[5]*domain->xy + pbc[4]*domain->xz;
+      dy = pbc[1]*domain->yprd + pbc[3]*domain->yz;
+      dz = pbc[2]*domain->zprd;
+    }
+    for (i = 0; i < n; i++) {
+      j = list[i];
+      buf[m++] = x[j][0] + dx;
+      buf[m++] = x[j][1] + dy;
+      buf[m++] = x[j][2] + dz;
+      for (k = 0; k < npe; k++) {
+        buf[m++] = nodex[j][k][0] + dx;
+        buf[m++] = nodex[j][k][1] + dy;
+        buf[m++] = nodex[j][k][2] + dz;
+      }
+    }
+  }
+  return m;
+}
+
+
+/* ---------------------------------------------------------------------- */
+
+void ElementVecRHB::unpack_comm(int n, int first, double *buf)
+{
+  int i,j,m,last;
+
+  m = 0;
+  last = first + n;
+  for (i = first; i < last; i++) {
+    x[i][0] = buf[m++];
+    x[i][1] = buf[m++];
+    x[i][2] = buf[m++];
+    for (j = 0; j < npe; j++) {
+      nodex[i][j][0] = buf[m++];
+      nodex[i][j][1] = buf[m++];
+      nodex[i][j][2] = buf[m++];
+    }
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+
+int ElementVecRHB::pack_reverse(int n, int first, double *buf)
+{
+  int i,j,m,last;
+
+  m = 0;
+  last = first + n;
+  for (i = first; i < last; i++) 
+    for (j = 0; j < npe; j++) {
+      buf[m++] = nodef[i][j][0];
+      buf[m++] = nodef[i][j][1];
+      buf[m++] = nodef[i][j][2];
+    }
+  return m;
+}
+
+/* ---------------------------------------------------------------------- */
+
+void ElementVecRHB::unpack_reverse(int n, int *list, double *buf)
+{
+  int i,j,k,m;
+  m = 0;
+  for (i = 0; i < n; i++) {
+    j = list[i];
+    for (k = 0; k < npe; k++) {
+      nodef[j][k][0] += buf[m++];
+      nodef[j][k][1] += buf[m++];
+      nodef[j][k][2] += buf[m++];
+    }
+  }
+}
+
+
+/* ----------------------------------------------------------------------
+   add a new element
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::create_element(double *coord, double **nodecoord, int ietype, int ictype, int itag)
+{
+
+  int nlocal = element->nlocal;
+  if (nlocal == nmax) grow(0);
+  while ((nlocal+1) * element->max_nintg >= nmaxintg) grow_nmaxintg();
+  while ((nlocal+1) * element->max_nintpl >= nmaxintpl) grow_nmaxintpl();
+
+  x[nlocal][0] = coord[0];
+  x[nlocal][1] = coord[1];
+  x[nlocal][2] = coord[2];
+  for (int i = 0; i < npe; i++) {
+    nodex[nlocal][i][0] = nodecoord[i][0];
+    nodex[nlocal][i][1] = nodecoord[i][1];
+    nodex[nlocal][i][2] = nodecoord[i][2];
+    nodev[nlocal][i][0] = 0.0;
+    nodev[nlocal][i][1] = 0.0;
+    nodev[nlocal][i][2] = 0.0;
+    nodemask[nlocal][i] = 1|2;
+  }
+
+  etype[nlocal] = ietype;
+  ctype[nlocal] = ictype;
+  initial_size[nlocal] = 0.0;
+  tag[nlocal] = itag;
+  mask[nlocal] = 1|2; 
+  image[nlocal] = ((imageint) IMGMAX << IMG2BITS) | ((imageint) IMGMAX << IMGBITS) | IMGMAX;
+
+  element->nlocal++;
+}
+
+/* ----------------------------------------------------------------------
+   add a new element, node coords are calculated from lattice
+   lattice must be defined to call this function
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::create_element(double *coord, int ietype, int ictype, int itag)
+{
+  int nlocal = element->nlocal;
+  if (nlocal == nmax) grow(0);
+  while ((nlocal+1) * element->max_nintg >= nmaxintg) grow_nmaxintg();
+  while ((nlocal+1) * element->max_nintpl >= nmaxintpl) grow_nmaxintpl();
+  x[nlocal][0] = coord[0];
+  x[nlocal][1] = coord[1];
+  x[nlocal][2] = coord[2];
+
+  double xtmp = coord[0];
+  double ytmp = coord[1];
+  double ztmp = coord[2];
+
+  if (domain->lattice)
+    domain->lattice->box2lattice(xtmp,ytmp,ztmp);
+  else 
+    error->one(FLERR,"lattice must be defined to create new element");
+
+  double *a1 = domain->lattice->a1;
+  double *a2 = domain->lattice->a2;
+  double *a3 = domain->lattice->a3;
+
+  int c1,c2,c3;
+
+  c1 = naae[ietype][0]-1; 
+  c2 = naae[ietype][1]-1; 
+  c3 = naae[ietype][2]-1;
+
+  double xnode,ynode,znode;
+
+  if (domain->dimension == 3) {
+
+    double d[8][3] = {{-1,-1,-1},
+      { 1,-1,-1},
+      { 1, 1,-1},
+      {-1, 1,-1},
+      {-1,-1, 1},
+      { 1,-1, 1},
+      { 1, 1, 1},
+      {-1, 1, 1}};
+
+    for (int i = 0; i < npe; i++) {
+      xnode = xtmp + c1*d[i][0]/2.0;
+      ynode = ytmp + c2*d[i][1]/2.0;
+      znode = ztmp + c3*d[i][2]/2.0;
+
+      domain->lattice->lattice2box(xnode,ynode,znode);
+
+      nodex[nlocal][i][0] = xnode;
+      nodex[nlocal][i][1] = ynode;
+      nodex[nlocal][i][2] = znode;
+
+      nodev[nlocal][i][0] = 0.0;
+      nodev[nlocal][i][1] = 0.0;
+      nodev[nlocal][i][2] = 0.0;
+      nodetag[nlocal][i] = 0;
+      nodemask[nlocal][i] = 1|2;
+    }
+  } else {
+    double d[4][2] = {{-1,-1},
+      { 1,-1},
+      { 1, 1},
+      {-1, 1}};
+
+    for (int i = 0; i < npe; i++) {
+      xnode = xtmp + c1*d[i][0]/2.0;
+      ynode = ytmp + c2*d[i][1]/2.0;
+      znode = ztmp;
+
+      domain->lattice->lattice2box(xnode,ynode,znode);
+
+      nodex[nlocal][i][0] = xnode;
+      nodex[nlocal][i][1] = ynode;
+      nodex[nlocal][i][2] = znode;
+
+      nodev[nlocal][i][0] = 0.0;
+      nodev[nlocal][i][1] = 0.0;
+      nodev[nlocal][i][2] = 0.0;
+      nodetag[nlocal][i] = 0;
+      nodemask[nlocal][i] = 1|2;
+    }
+  }
+  etype[nlocal] = ietype;
+  ctype[nlocal] = ictype;
+  initial_size[nlocal] = 0.0;
+  tag[nlocal] = itag;
+  mask[nlocal] = 1|2; 
+  image[nlocal] = ((imageint) IMGMAX << IMG2BITS) | ((imageint) IMGMAX << IMGBITS) | IMGMAX;
+
+  element->nlocal++;
+}
+
+/*----------------------------------------------------
+  pack element info for Atoms section in data file from write_data_elem command
+  ------------------------------------------*/
+
+void ElementVecRHB::pack_element_data_elem(double **buf, tagint tag_offset)
+{
+  int k = 0;
+  for (int i = 0; i < element->nlocal; i++) {
+    buf[k][0] = ubuf(tag[i] + tag_offset).d;
+    buf[k][1] = ubuf(ctype[i]).d;
+    buf[k][2] = x[i][0];
+    buf[k][3] = x[i][1];
+    buf[k][4] = x[i][2];
+    k++;
+  }
+}
+
+/* ----------------------------------------------------------------------
+   pack velocity info for data file from write_data_elem command
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::pack_element_vel_data_elem(double **buf, tagint tag_offset)
+{
+  int k = 0;
+  double vel[3];
+  tagint mytag;
+  double itype;
+  for (int i = 0; i < element->nlocal; i++) {
+    buf[k][0] = ubuf(tag[i] + tag_offset).d;
+    buf[k][1] = ubuf(ctype[i]).d;
+    vel[0] = vel[1] = vel[2] = 0.0;
+    for (int j = 0; j < npe; j++) {
+      vel[0] += nodev[i][j][0];
+      vel[1] += nodev[i][j][1];
+      vel[2] += nodev[i][j][2];
+    }
+    buf[k][2] = vel[0]/npe;
+    buf[k][3] = vel[1]/npe;
+    buf[k][4] = vel[2]/npe;
+    k++;
+  }
+}
+
+/* ----------------------------------------------------
+   pack node info for Atoms section in data file from write_data_elem command
+   ------------------------------------------*/
+
+void ElementVecRHB::pack_node_data_elem(double **buf, tagint tag_offset)
+{
+  int k = 0;
+  for (int i = 0; i < element->nlocal; i++) {
+    for (int j = 0; j < npe; j++) {
+      buf[k][0] = ubuf(nodetag[i][j]+tag_offset).d;
+      buf[k][1] = ubuf(atom->ntypes+1).d;
+      buf[k][2] = nodex[i][j][0];
+      buf[k][3] = nodex[i][j][1];
+      buf[k][4] = nodex[i][j][2];
+      k++;
+    }
+  }
+}
+
+/* ----------------------------------------------------------------------
+   pack node velocity info for data file from write_data_elem command
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::pack_node_vel_data_elem(double **buf, tagint tag_offset)
+{
+  int k = 0;
+  for (int i = 0; i < element->nlocal; i++) {
+    for (int j = 0; j < npe; j++) {
+      buf[k][0] = ubuf(nodetag[i][j]+tag_offset).d;
+      buf[k][1] = ubuf(atom->ntypes+1).d;
+      buf[k][2] = nodev[i][j][0];
+      buf[k][3] = nodev[i][j][1];
+      buf[k][4] = nodev[i][j][2];
+      k++;
+    }
+  }
+}
+
+/*----------------------------------------------------
+  write node info into Atoms section in data file from write_data_elem command
+  ------------------------------------------*/
+
+void ElementVecRHB::write_data_elem(FILE *fp, int n, double **buf)
+{
+  for (int i = 0; i < n; i++)
+    fprintf(fp,TAGINT_FORMAT " %d %-1.16e %-1.16e %-1.16e \n",
+        (tagint) ubuf(buf[i][0]).i, (int) ubuf(buf[i][1]).i,buf[i][2],buf[i][3],buf[i][4]);
+}
+
+/* ----------------------------------------------------------------------
+   write node velocity info to data file from write_data_elem command
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::write_vel_data_elem(FILE *fp, int n, double **buf)
+{
+  for (int i = 0; i < n; i++)
+    fprintf(fp,TAGINT_FORMAT " %d %-1.16e %-1.16e %-1.16e\n",
+        (tagint) ubuf(buf[i][0]).i,(int) ubuf(buf[i][1]).i,buf[i][2],buf[i][3],buf[i][4]);
+}
+
+/* ----------------------------------------------------
+   write element info into Elements section in data file from write_data command
+   ------------------------------------------*/
+
+void ElementVecRHB::write_element_data(FILE *fp, int n, double **buf)
+{
+  for (int i = 0; i < n; i++)
+    fprintf(fp,TAGINT_FORMAT " %d %d %-1.16e %-1.16e %-1.16e \n",
+        (tagint) ubuf(buf[i][0]).i, (int) ubuf(buf[i][1]).i, (int) ubuf(buf[i][2]).i,buf[i][3],buf[i][4],buf[i][5]);
+}
+
+/* ----------------------------------------------------
+   pack element info for Elements section in data file from write_data command
+   ------------------------------------------*/
+
+void ElementVecRHB::pack_element_data(double **buf)
+{
+  for (int i = 0; i < element->nlocal; i++) {
+    buf[i][0] = ubuf(tag[i]).d;
+    buf[i][1] = ubuf(etype[i]).d;
+    buf[i][2] = ubuf(ctype[i]).d;
+    buf[i][3] = x[i][0];
+    buf[i][4] = x[i][1];
+    buf[i][5] = x[i][2];
+  }
+}
+
+/* ----------------------------------------------------
+   write node info into Nodes section in data file from write_data command
+   ------------------------------------------*/
+
+void ElementVecRHB::write_node_data(FILE *fp, int n, double **buf)
+{
+  for (int i = 0; i < n; i++)
+    fprintf(fp,TAGINT_FORMAT " %d %-1.16e %-1.16e %-1.16e "TAGINT_FORMAT" \n",
+        (tagint) ubuf(buf[i][0]).i, (int) ubuf(buf[i][1]).i,buf[i][2],buf[i][3],buf[i][4],(tagint) ubuf(buf[i][5]).i);
+}
+
+/* ----------------------------------------------------
+   pack node info for Nodes section in data file from write_data command
+   ------------------------------------------*/
+
+void ElementVecRHB::pack_node_data(double **buf)
+{
+  int k = 0;
+  for (int i = 0; i < element->nlocal; i++) {
+    for (int j = 0; j < npe; j++) {
+      buf[k][0] = ubuf(tag[i]).d;
+      buf[k][1] = ubuf(j+1).d;
+      buf[k][2] = nodex[i][j][0];
+      buf[k][3] = nodex[i][j][1];
+      buf[k][4] = nodex[i][j][2];
+      buf[k][5] = ubuf(nodetag[i][j]).d; 
+      k++;
+    }
+  }
+}
+
+/* ----------------------------------------------------------------------
+   pack velocity info for data file from write_data command
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::pack_vel_data(double **buf)
+{
+  int k = 0;
+  for (int i = 0; i < element->nlocal; i++) {
+    for (int j = 0; j < npe; j++) {
+      buf[k][0] = ubuf(tag[i]).d;
+      buf[k][1] = ubuf(j+1).d;
+      buf[k][2] = nodev[i][j][0];
+      buf[k][3] = nodev[i][j][1];
+      buf[k][4] = nodev[i][j][2];
+      k++;
+    }
+  }
+}
+
+/* ----------------------------------------------------------------------
+   write velocity info to data file from write_data command
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::write_vel_data(FILE *fp, int n, double **buf)
+{
+  for (int i = 0; i < n; i++)
+    fprintf(fp,TAGINT_FORMAT " %d %-1.16e %-1.16e %-1.16e\n",
+        (tagint) ubuf(buf[i][0]).i,(int) ubuf(buf[i][1]).i,buf[i][2],buf[i][3],buf[i][4]);
+}
+
+/* ----------------------------------------------------------------------
+   write interpolate information to Interpolate section in data file from write_data command
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::write_interpolate(FILE *fp)
+{
+  for (int i = 1; i <= element->netypes; i++) 
+    fprintf(fp,"%d %d %d %d\n",i,naae[i][0],naae[i][1],naae[i][2]);
+}
+
+/* ----------------------------------------------------------------------
+   write integration information to Integration section in data file write_data command
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::write_integration(FILE *fp)
+{
+  if (element->intg_input_style == 2) {
+    for (int i = 1; i <= element->netypes; i++)
+      fprintf(fp,"%d %d\n",i,nintg[i]);
+    for (int i = 1; i <= element->netypes; i++)
+      for (int j = 0; j < nintg[i]; j++)
+        fprintf(fp,"%d %d %d %d %d %f\n",i,j+1,
+            intg[i][j][0],intg[i][j][1],intg[i][j][2],weight[i][j]);
+  } else {
+    for (int i = 1; i <= element->netypes; i++) 
+      fprintf(fp,"%d %d %d %d\n",i,niae[i][0],niae[i][1],niae[i][2]);
+  }
+}
+
+/*----------------------------------------------------
+  write node info into Nodes section in dat file from write_dat command
+  ------------------------------------------*/
+
+void ElementVecRHB::write_node_dat(FILE *fp, int n, double **buf)
+{
+  for (int i = 0; i < n; i++)
+    fprintf(fp,"%-1.16e %-1.16e %-1.16e\n",
+        buf[i][0],buf[i][1],buf[i][2]);
+}
+
+/*----------------------------------------------------
+  write node connectivity info into Nodes section in dat file
+  ------------------------------------------*/
+
+void ElementVecRHB::write_node_connect_dat(FILE *fp, int n, double **buf)
+{
+  for (int i = 0; i < n; i++) {
+    for (int j = 0; j < npe; j++)
+      fprintf(fp,TAGINT_FORMAT" ",(tagint) ubuf(buf[i][j]).i);
+    fprintf(fp,"\n");
+  }
+}
+
+/*----------------------------------------------------
+  pack node info for Nodes section in dat file from write_dat command
+  ------------------------------------------*/
+
+void ElementVecRHB::pack_node_dat(double **buf)
+{
+  int k = 0;
+  for (int i = 0; i < element->nlocal; i++) {
+    for (int j = 0; j < npe; j++) {
+      buf[k][0] = nodex[i][j][0];
+      buf[k][1] = nodex[i][j][1];
+      buf[k][2] = nodex[i][j][2];
+      k++;
+    }
+  }
+}
+
+/*----------------------------------------------------
+  pack node connectivity info for Nodes section in dat file
+  ------------------------------------------*/
+
+void ElementVecRHB::pack_node_connect_dat(double **buf)
+{
+  for (int i = 0; i < element->nlocal; i++) {
+    for (int j = 0; j < npe; j++) {
+      buf[i][j] = ubuf(nodetag[i][j]).d;
+    }
+  }
+}
+
+/* ---------------------------------------------
+   Setup interpolated atoms
+   -------------------------------*/
+
+void ElementVecRHB::set_interpolate(const char *str, int type_offset)
+{
+  int itype;
+  int nx,ny,nz;
+  int n = sscanf(str,"%d %d %d %d", &itype,&nx,&ny,&nz);
+  itype += type_offset;
+  if (itype < 1 || itype > element->netypes)
+    error->all(FLERR,"Invalid element type for interpolate set");
+  if (n != 4) error->all(FLERR, "Invalid interpolate line in data file");
+  if (interpolate_setflag[itype]) {
+    if (nx == naae[itype][0] ||
+        ny == naae[itype][1] ||
+        nz == naae[itype][2])
+      return;
+    error->all(FLERR,"Interpolated atoms for this element type has been set");
+  }
+  interpolate_setflag[itype] = 1;
+
+  naae[itype][0] = nx;
+  naae[itype][1] = ny;
+  naae[itype][2] = nz;
+
+  if (nx < 2 || ny < 2) error->all(FLERR,"Invalid interpolate values");
+
+  if (domain->dimension == 2 && nz != 1) 
+    error->all(FLERR,"Number of atoms along third direction must be one for 2D"); 
+  else if (nz < 2) error->all(FLERR,"Invalid interpolate values");
+
+  n = nx*ny*nz;
+  if (n > element->maxintpl) error->all(FLERR,"Too many interpolated atoms per element, boost maxintpl");
+  element->max_nintpl = MAX(element->max_nintpl,n);
+  nintpl[itype] = n;
+  setup_interpolate_element(itype);
+  if (subelemflag == 0) {
+    setup_sub_element();
+    subelemflag = 1;
+  }
+  setup_sub_element(itype);
+}
+
+/* ------------------------------------------
+   Setup integration points from data file
+ * ----------------------------------*/
+
+void ElementVecRHB::set_integration(const char *str, int type_offset)
+{
+  int itype;
+  int nx,ny,nz;
+  int n = sscanf(str,"%d %d %d %d", &itype,&nx,&ny,&nz);
+  itype += type_offset;
+  if (itype < 1 || itype > element->netypes)
+    error->all(FLERR,"Invalid element type for integration");
+
+  if (n != 4) error->all(FLERR, "Invalid integration line in data file");
+  if (integration_setflag[itype]) {
+    if (nx == niae[itype][0] ||
+        ny == niae[itype][1] ||
+        nz == niae[itype][2])
+      return;
+    error->all(FLERR,"Integration points for this element type has been set");
+  }
+  integration_setflag[itype] = 1;
+
+  if (!interpolate_setflag[itype]) {
+    char *errstr = new char[100];
+    sprintf(errstr,"Interpolation for element type %d must be defined for integration points setup",itype);
+    error->all(FLERR,errstr);
+    delete [] errstr;
+  }
+  niae[itype][0] = nx;
+  niae[itype][1] = ny;
+  niae[itype][2] = nz;
+
+  if (nx < 2 || ny < 2) error->all(FLERR,"Invalid integration values");
+
+  if (domain->dimension == 2) {
+    if (nz != 1) error->all(FLERR,"Number of integrations along third direction must be one for 2D"); 
+  } else {
+    if (nz < 2) error->all(FLERR,"Invalid integration values");
+  }
+
+  n = nx * ny * nz;
+  if (n > element->maxintg) error->all(FLERR,"Too many integration points per element, boost maxintg");
+  element->max_nintg = MAX(element->max_nintg,n);
+  nintg[itype] = n;
+
+  setup_integration_point(itype);
+}
+
+/* ------------------------------------------
+   Read number of integration points from Integration List 
+   section in data file
+ * ----------------------------------*/
+
+void ElementVecRHB::set_nintg_user(char *str, int type_offset)
+{
+  int itype;
+  int n,num;
+  n = sscanf(str,"%d %d", &itype,&num);
+  if (n != 2) error->all(FLERR, "Invalid Integration points line in data file");
+  itype += type_offset;
+  if (itype < 1 || itype > element->netypes)
+    error->all(FLERR,"Invalid type for Integration points set");
+
+  if (!interpolate_setflag[itype]) {
+    char *erstr = new char[100];
+    sprintf(erstr,"Number of interpolated atoms for element type %d has not been defined yet",itype);
+    error->all(FLERR,erstr);
+    delete [] erstr;
+  }
+  if (integration_setflag[itype]) 
+    error->all(FLERR,"Integration points for this element type has already been set");
+
+  nintg[itype] = num;
+  if (nintg[itype] <= 0 || nintg[itype] > element->maxintg)
+    error->all(FLERR,"Invalid number of integration points value in Integration List section");
+
+}
+
+/* ------------------------------------------
+   Read integration points from Integration List 
+   section in data file
+ * ----------------------------------*/
+
+void ElementVecRHB::set_intg_user(char *str, int type_offset)
+{
+  int itype,iintg,i;
+  int nx,ny,nz;
+  int niax,niay,niaz;
+  char **values = new char*[6];
+
+  values[0] = strtok(str," \t\n\r\f");
+
+  for (i = 1; i < 6; i++) 
+    values[i] = strtok(NULL," \t\n\r\f");
+
+  if (values[0] == NULL) 
+    error->all(FLERR,"Invalid integration point line in data file");
+  itype = atoi(values[0]) + type_offset;
+  if (itype < 1 || itype > element->netypes)
+    error->all(FLERR,"Invalid type for Integration points set");
+
+  if (!interpolate_setflag[itype]) {
+    char *errstr = new char[100];
+    sprintf(errstr,"Number of interpolated atoms for element type %d has not been defined yet",itype);
+    error->all(FLERR,errstr);
+    delete [] errstr;
+  }
+
+  iintg = atoi(values[1])-1;
+  nx = atoi(values[2]);
+  ny = atoi(values[3]);
+  nz = atoi(values[4]);
+
+  niax = naae[itype][0];
+  niay = naae[itype][1];
+  niaz = naae[itype][2];
+  if (nx >= niax || ny >= niay || nz >= niaz ||
+      nx < 0 || ny < 0 || nz < 0) 
+    error->all(FLERR,"Invalid Integration points line in data file");
+
+  intg[itype][iintg][0] = nx;
+  intg[itype][iintg][1] = ny;
+  intg[itype][iintg][2] = nz;
+  weight[itype][iintg] = atof(values[5]); 
+
+  // mapping between integration point index and interpolated atom index
+
+  int iintpl = nx*niay*niaz + ny*niaz + nz;
+  if (i2ia[itype][iintg] < 0) {
+    i2ia[itype][iintg] = iintpl;
+    ia2i[itype][iintpl] = iintg;
+  } else error->all(FLERR,"Integration point to interpolated atom mapping is not correct");
+
+
+  for (i = 0; i < npe; i++) {
+
+    weighted_shape_array[itype][iintg][i] = 
+      shape_array[itype][iintpl][i] * weight[itype][iintg] *npe / nintpl[itype];
+
+    // mapping between node index and integration point index
+
+    if (fabs(shape_array[itype][iintpl][i]-1.0) < EPSILON) {
+      if (n2i[itype][i] < 0) {
+        n2i[itype][i] = iintg;
+        i2n[itype][iintg] = i;
+      } else error->all(FLERR,"Node to integration point mapping is not correct");
+    }
+  }
+
+  delete [] values;
+
+} 
+
+/* -----------------------------------------------------------------------------------
+   Calculate integration point related arrays:
+   - Weight of integration points
+   - i2ia to convert integration point index 
+   to interpolated atom index in an element,
+   used for interpolating integration points
+   - n2i to convert node index to integration point index
+   Must be done after setting up interpolate element
+   ------------------------------------------------------------------------------------*/
+
+void ElementVecRHB::setup_integration_point(int itype)
+{
+  double dx,dy,dz;
+  double px,py,pz;
+  int x,y,z,w;
+  double w_edge_x,w_face_xy;
+  double w_edge_y,w_face_yz;
+  double w_edge_z,w_face_xz;
+  double w_inner;
+  double total_weight;
+  int niax,niay,niaz;
+  int nix,niy,niz;
+  int nx,ny,nz;
+  int i,j,k;
+  int inode,iintg,iintpl;
+
+  double **xgauss = element->xgauss;
+  double **wgauss = element->wgauss;
+  double node_weight = element->node_weight;
+
+  // number of interpolated atoms along each edge
+
+  niax = naae[itype][0];
+  niay = naae[itype][1];
+  niaz = naae[itype][2];
+
+  // number of integration points along each edge
+
+  nix = niae[itype][0];
+  niy = niae[itype][1];
+  niz = niae[itype][2];
+
+  // calculate weight fraction for integration points
+
+  double scale = niax * niay * niaz;
+  scale = (scale-npe*node_weight)/(scale-npe);
+  w_edge_x = static_cast<double> (niax - 2)/2.0*scale;
+  w_edge_y = static_cast<double> (niay - 2)/2.0*scale;
+  if (domain->dimension == 3) {
+    w_edge_z = static_cast<double> (niaz - 2)/2.0*scale;
+    w_face_xy = w_edge_x * w_edge_y * scale;
+    w_face_yz = w_edge_y * w_edge_z * scale;
+    w_face_xz = w_edge_x * w_edge_z * scale;
+    w_inner = w_edge_x * w_edge_y * w_edge_z * scale;
+  } else w_inner = w_edge_x * w_edge_y * scale;
+
+  // loop over integration points
+  // nx,ny,nz are indices of interpolated atoms
+  // that are integration points (rounded to nearest whole integer)
+
+  dx = (niax-1) / static_cast<double>(nix-1);
+  dy = (niay-1) / static_cast<double>(niy-1);
+  if (domain->dimension == 3)
+    dz = (niaz-1.0) / static_cast<double>(niz-1.0);
+  iintg = 0; 
+  for (i = 0; i < nix; i++) {
+    if (i == 0) nx = 0;
+    else if (i == nix-1) nx = niax-1;
+    else nx = (int) ((1.0 + xgauss[nix-2][i])/2.0*(niax-2)+1.0);
+    for (j = 0; j < niy; j++) {
+      if (j == 0) ny = 0;
+      else if (j == niy-1) ny = niay-1;
+      else ny = (int) ((1.0 + xgauss[niy-2][j])/2.0*(niay-2)+1.0);
+      if (domain->dimension == 3) {
+        for (k = 0; k < niz; k++) {
+          if (k == 0) nz = 0;
+          else if (k == niz-1) nz = niaz-1;
+          else nz = (int) ((1.0 + xgauss[niz-2][k])/2.0*(niaz-2)+1.0);
+
+          // calculate weight of integration points
+
+          x = (i == 0 || i == (nix - 1));
+          y = (j == 0 || j == (niy - 1));
+          z = (k == 0 || k == (niz - 1));
+          w = x + y + z;
+
+          // integration point is a node
+
+          if (w == 3) weight[itype][iintg] = node_weight;
+
+          // integration point is on an edge
+
+          else if (w == 2) {
+            // integration point is on edge in x direction
+            if (!x) weight[itype][iintg] = w_edge_x*wgauss[nix-2][i];
+            // integration point is on edge in y direction
+            else if (!y) weight[itype][iintg] = w_edge_y*wgauss[niy-2][j];
+            // integration point is on edge in z direction
+            else if (!z) weight[itype][iintg] = w_edge_z*wgauss[niy-2][k];
+
+            // integration point is on a face
+
+          } else if (w == 1) {
+            // integration point is on yz face 
+            if (x) weight[itype][iintg] = w_face_yz*wgauss[niy-2][j]*wgauss[niz-2][k];
+            // integration point is on xz face 
+            else if (y) weight[itype][iintg] = w_face_xz*wgauss[nix-2][i]*wgauss[niz-2][k];
+            // integration point is on xy face 
+            else if (z) weight[itype][iintg] = w_face_xy*wgauss[nix-2][i]*wgauss[niy-2][j];
+
+            // integration point is inside element
+
+          } else weight[itype][iintg] = w_inner*wgauss[nix-2][i]*wgauss[niy-2][j]*wgauss[niz-2][k];
+
+          intg[itype][iintg][0] = nx;
+          intg[itype][iintg][1] = ny;
+          intg[itype][iintg][2] = nz;
+
+          // list to convert integration point index to 
+          // interpolated atom index
+
+          iintpl = nx*niay*niaz + ny*niaz + nz;
+          i2ia[itype][iintg] = iintpl;
+          ia2i[itype][iintpl] = iintg;
+
+          for (inode = 0; inode < npe; inode++) {
+
+            // weighted shape array to distribute force from integration points to nodes
+
+            weighted_shape_array[itype][iintg][inode] = 
+              shape_array[itype][iintpl][inode] * weight[itype][iintg] * npe / nintpl[itype];
+
+            // list to convert node index to integration point index
+
+            if (fabs(shape_array[itype][i2ia[itype][iintg]][inode]-1.0) < EPSILON) {
+              if (n2i[itype][inode] < 0) {
+                n2i[itype][inode] = iintg;
+                i2n[itype][iintg] = inode;
+              } else error->all(FLERR,"Node to integration point mapping is not correct");
+            }
+          }
+          iintg++;
+        }
+      } else {
+
+        x = (i == 0 || i == (nix - 1));
+        y = (j == 0 || j == (niy - 1));
+        w = x + y;
+
+        // integration point is a node
+
+        if (w == 2) weight[itype][iintg] = 1.0;
+
+        // integration point is on an edge
+
+        else if (w == 1) {
+          // integration point is on edge in x direction
+          if (!x) weight[itype][iintg] = w_edge_x;
+          // integration point is on edge in y direction
+          else if (!y) weight[itype][iintg] = w_edge_y;
+
+          // integration point is inside element
+
+        } else weight[itype][iintg] = w_inner;
+
+        intg[itype][iintg][0] = nx;
+        intg[itype][iintg][1] = ny;
+        intg[itype][iintg][2] = 0;
+
+        // list to convert integration point index to 
+        // interpolated atom index
+
+        iintpl = nx*niay + ny;
+        i2ia[itype][iintg] = iintpl;
+        ia2i[itype][iintpl] = iintg;
+
+        for (inode = 0; inode < npe; inode++) {
+
+          // weighted shape array to distribute force from integration points to nodes
+
+          weighted_shape_array[itype][iintg][inode] = 
+            shape_array[itype][iintpl][inode] * weight[itype][iintg] * npe / nintpl[itype];
+
+          // list to convert node index to integration point index
+
+          if (fabs(shape_array[itype][i2ia[itype][iintg]][inode]-1.0) < EPSILON) {
+            if (n2i[itype][inode] < 0) {
+              n2i[itype][inode] = iintg;
+              i2n[itype][iintg] = inode;
+            } else error->all(FLERR,"Node to integration point mapping is not correct");
+          }
+        }
+        iintg++;
+      }
+    }
+  }
+
+  // check if all node to integration point mapping is set
+
+  for (inode = 0; inode < npe; inode++) {
+    if (n2i[itype][inode] < 0) 
+      error->all(FLERR,"Node to integration point mapping is not complete");
+    if (i2n[itype][n2i[itype][inode]] < 0)
+      error->all(FLERR,"Integration point to node mapping is not complete");
+    n2ia[itype][inode] = i2ia[itype][n2i[itype][inode]];
+  }
+  // check if weight is assigned correctly
+
+  total_weight = 0.0;
+  for (int l = 0; l < nintg[itype]; l++) total_weight += weight[itype][l];
+  if (fabs(total_weight - nintpl[itype]) > EPSILON) error->all(FLERR,"Integraion weight is not assigned correctly");
+}
+
+/*-----------------------------------------------------------------------------------
+  Calculate interpolated atom related arrays for etype itype
+  - Shape function array to interpolate atoms
+  - Use linear interpolation function
+  x direction: node 0 -> 1
+  y direction: node 0 -> 3 
+  z direction: node 0 -> 4 
+  ------------------------------------------------------------------------------------*/
+
+void ElementVecRHB::setup_interpolate_element(int itype)
+{
+  int i,j,k,n;
+  double px,py,pz;
+  double dx_pc,dy_pc,dz_pc;
+  int nx,ny,nz;
+
+  nx = naae[itype][0];
+  ny = naae[itype][1];
+  nz = naae[itype][2];
+  if ((nx-1)*(ny-1) >= element->max_surface_intpl ||
+      (nz-1)*(ny-1) >= element->max_surface_intpl ||
+      (nx-1)*(nz-1) >= element->max_surface_intpl)
+    error->all(FLERR,"Number of interpolated atoms on a surface exceed max_surface_intpl");
+  dx_pc = 2.0/(nx-1);
+  dy_pc = 2.0/(ny-1);
+  if (domain->dimension == 3) dz_pc = 2.0/(nz-1);
+
+  // calculate shape function arrays
+
+  n = 0;
+  int nsur[6],nedge[12];
+  nsur[0] = nsur[1] = nsur[2] = nsur[3] = nsur[4] = nsur[5] = 0;
+  nedge[0] = nedge[1] = nedge[2] = nedge[3] = nedge[4] = nedge[5] = 0;
+  nedge[6] = nedge[7] = nedge[8] = nedge[9] = nedge[10] = nedge[11] = 0;
+
+  for (i = 0; i < nx; i++) {
+    px = dx_pc*i - 1.0;
+    for (j = 0; j < ny; j++) {
+      py = dy_pc*j - 1.0;
+      if (domain->dimension == 3) {
+        for (k = 0; k < nz; k++) {
+          pz = dz_pc*k - 1.0;
+          shape_array[itype][n][0] = 0.125*(1-px)*(1-py)*(1-pz);
+          shape_array[itype][n][1] = 0.125*(1+px)*(1-py)*(1-pz);
+          shape_array[itype][n][2] = 0.125*(1+px)*(1+py)*(1-pz);
+          shape_array[itype][n][3] = 0.125*(1-px)*(1+py)*(1-pz);
+          shape_array[itype][n][4] = 0.125*(1-px)*(1-py)*(1+pz);
+          shape_array[itype][n][5] = 0.125*(1+px)*(1-py)*(1+pz);
+          shape_array[itype][n][6] = 0.125*(1+px)*(1+py)*(1+pz);
+          shape_array[itype][n][7] = 0.125*(1-px)*(1+py)*(1+pz);
+          if (k != 0 && k != nz-1) {
+            if (i == 0 && j == 0) {
+              edge_intpl[itype][0][nedge[0]++] = n; 
+            } else if (i == 0 && j == ny-1) {
+              edge_intpl[itype][1][nedge[1]++] = n; 
+            } else if (i == nx-1 && j == 0) {
+              edge_intpl[itype][2][nedge[2]++] = n; 
+            } else if (i == nx-1 && j == ny-1) {
+              edge_intpl[itype][3][nedge[3]++] = n; 
+            } else if (i == 0) {
+              surface_intpl[itype][0][nsur[0]++] = n;
+            } else if (i == nx-1) {
+              surface_intpl[itype][1][nsur[1]++] = n;
+            } else if (j == 0) {
+              surface_intpl[itype][2][nsur[2]++] = n;
+            } else if (j == ny-1) {
+              surface_intpl[itype][3][nsur[3]++] = n;
+            }
+          } else if (k == 0) {
+            if (j != 0 && j != ny-1) {
+              if (i == 0) {
+                edge_intpl[itype][4][nedge[4]++] = n; 
+              } else if (i == nx-1) {
+                edge_intpl[itype][6][nedge[6]++] = n; 
+              } else {
+                surface_intpl[itype][4][nsur[4]++] = n;
+              }
+            } else if (i != 0 && i != nx-1) {
+              if (j == 0) {
+                edge_intpl[itype][8][nedge[8]++] = n; 
+              } else {
+                edge_intpl[itype][10][nedge[10]++] = n; 
+              }
+            }
+          } else {
+            if (j != 0 && j != ny-1) {
+              if (i == 0) {
+                edge_intpl[itype][5][nedge[5]++] = n; 
+              } else if (i == nx-1) {
+                edge_intpl[itype][7][nedge[7]++] = n; 
+              } else {
+                surface_intpl[itype][5][nsur[5]++] = n;
+              }
+            } else if (i != 0 && i != nx-1) {
+              if (j == 0) {
+                edge_intpl[itype][9][nedge[9]++] = n; 
+              } else {
+                edge_intpl[itype][11][nedge[11]++] = n; 
+              }
+            }
+          }
+          n++;
+        }
+      } else {
+        shape_array[itype][n][0] = 0.25*(1-px)*(1-py);
+        shape_array[itype][n][1] = 0.25*(1+px)*(1-py);
+        shape_array[itype][n][2] = 0.25*(1+px)*(1+py);
+        shape_array[itype][n][3] = 0.25*(1-px)*(1+py);
+        if (j != 0 && j != ny-1) {
+          if (i == 0) {
+            edge_intpl[itype][0][nedge[0]++] = n; 
+          } else if (i == nx-1) {
+            edge_intpl[itype][1][nedge[1]++] = n; 
+          }
+        } else if (i != 0 && i != nx-1) {
+          if (j == 0) {
+            edge_intpl[itype][9][nedge[9]++] = n; 
+          } else {
+            edge_intpl[itype][11][nedge[11]++] = n; 
+          }
+        }
+
+        if (i == 0 && j != 0 && j != ny-1)
+          edge_intpl[itype][0][nedge[0]++] = n; 
+        else if (i == nx-1 && j != 0 && j != ny-1)
+          edge_intpl[itype][1][nedge[1]++] = n; 
+        else if (j == 0 && i != 0 && i != nx-1)
+          edge_intpl[itype][2][nedge[2]++] = n; 
+        else if (j == ny-1 && i != 0 && i != nx-1)
+          edge_intpl[itype][3][nedge[3]++] = n; 
+        n++;
+      }
+    }
+  }
+
+  for (i = 0; i < 6; i++)
+    nsurface_intpl[itype][i] = nsur[i];
+  for (i = 0; i < 12; i++)
+    nedge_intpl[itype][i] = nedge[i];
+}
+/*-----------------------------------------------------------------------------------
+  Calculate sub-element related arrays for etype itype
+  - ias2ia to map atom index inside sub-element to atom index inside parent element
+  - natom_subelem: number of atoms inside each sub element
+  ------------------------------------------------------------------------------------*/
+
+void ElementVecRHB::setup_sub_element(int itype)
+{
+
+  double xlo,xhi,ylo,yhi,zlo,zhi;
+  int i,j,k,m,n,ntotal;
+  int x,y,z;
+  int isub = 0;
+  double px,py,pz;
+  double dx_pc,dy_pc,dz_pc;
+  int nx,ny,nz;
+  int esplit = element->esplit;
+  double ds = 2.0/esplit;
+
+  nx = naae[itype][0];
+  ny = naae[itype][1];
+  nz = naae[itype][2];
+
+  dx_pc = 2.0/(nx-1);
+  dy_pc = 2.0/(ny-1);
+
+  if (domain->dimension == 3)
+    dz_pc = 2.0/(nz-1);
+
+  ntotal = 0;
+
+  // makes sure atoms on element boundaries are included
+  // atoms might sit right on sub-element boundaries
+  // so subtract a small number from the boundaries to make sure
+  // all atoms are assigned to only one sub-element
+
+  for (x = 0; x < esplit; x++) {
+
+    xlo = -1.0 + x*ds - EPSILON;
+    if (x == (esplit-1)) xhi = 1.0 + EPSILON;
+    else xhi = xlo + ds - EPSILON;
+
+    for (y = 0; y < esplit; y++) {
+
+      ylo = -1.0 + y*ds - EPSILON;
+      if (y == (esplit-1)) yhi = 1.0 + EPSILON;
+      else yhi = ylo + ds - EPSILON;
+
+      if (domain->dimension == 3) {
+        for (z = 0; z < esplit; z++) {
+
+          zlo = -1.0 + z*ds - EPSILON;
+          if (z == (esplit-1)) zhi = 1.0 + EPSILON;
+          else zhi = zlo + ds - EPSILON;
+
+          n = 0; // number of atoms inside a sub element counter
+          m = 0; // index of interpolated atom in element
+
+          // place interpolated atoms into sub element isub
+
+          for (i = 0; i < nx; i++) {
+            px = dx_pc*i - 1.0;
+            for (j = 0; j < ny; j++) {
+              py = dy_pc*j - 1.0;
+              for (k = 0; k < nz; k++) {
+                pz = dz_pc*k - 1.0;
+                if (px >= xlo && px < xhi &&
+                    py >= ylo && py < yhi &&
+                    pz >= zlo && pz < zhi) {
+                  ias2ia[itype][isub][n++] = m;
+                  if (n > element->maxsubintpl) error->all(FLERR,"Too many atoms in a sub-element, boost maxsubintpl");
+                }
+                m++;
+              }
+            }
+          }
+          natom_subelem[itype][isub++] = n;
+          ntotal += n;
+        }
+      } else {
+
+        n = 0; // number of atoms inside a sub element counter
+        m = 0; // index of interpolated atom in element
+
+        // place interpolated atoms into sub element isub
+
+        for (i = 0; i < nx; i++) {
+          px = dx_pc*i - 1.0;
+          for (j = 0; j < ny; j++) {
+            py = dy_pc*j - 1.0;
+            if (px >= xlo && px < xhi &&
+                py >= ylo && py < yhi) {
+              ias2ia[itype][isub][n++] = m;
+              if (n > element->maxsubintpl) error->all(FLERR,"Too many atoms in a sub-element, boost maxsubintpl");
+            }
+            m++;
+          }
+        }
+        natom_subelem[itype][isub++] = n;
+        ntotal += n;
+      }
+    }
+  }
+
+  if (ntotal != nintpl[itype])
+    error->all(FLERR,"Total atom count in sub-elements do not match");
+}
+/* -------------------------------------------------
+   Setup sub-element related arrays in common for all element types
+   Called whenever esplit is changed
+   ------------------------------------------------*/
+
+void ElementVecRHB::setup_sub_element()
+{
+  int esplit = element->esplit;
+  if (domain->dimension == 3) nsubelem = esplit*esplit*esplit;
+  else nsubelem = esplit*esplit;
+  if (nsubelem > element->maxsubelem) error->all(FLERR,"Too many sub-elements");
+  element->nsubelem = nsubelem;
+  memory->destroy(element->shape_array_center_subelem);
+  shape_array_center_subelem = memory->create(element->shape_array_center_subelem,
+      nsubelem,npe,"element:shape_array_center_subelem");
+
+  double ds = 2.0/esplit;
+  // calculate sub-element center shape function array
+
+  int isub = 0;
+  int i,j,k; 
+  double px,py,pz;
+
+  for (i = 0; i < esplit; i++) {
+    px = (i + 0.5) * ds - 1.0;
+    for (j = 0; j < esplit; j++) {
+      py = (j + 0.5) * ds - 1.0;
+      if (domain->dimension == 3) {
+        for (k = 0; k < esplit; k++) {
+          pz = (k + 0.5) * ds - 1.0;
+          shape_array_center_subelem[isub][0] = 0.125*(1-px)*(1-py)*(1-pz);
+          shape_array_center_subelem[isub][1] = 0.125*(1+px)*(1-py)*(1-pz);
+          shape_array_center_subelem[isub][2] = 0.125*(1+px)*(1+py)*(1-pz);
+          shape_array_center_subelem[isub][3] = 0.125*(1-px)*(1+py)*(1-pz);
+          shape_array_center_subelem[isub][4] = 0.125*(1-px)*(1-py)*(1+pz);
+          shape_array_center_subelem[isub][5] = 0.125*(1+px)*(1-py)*(1+pz);
+          shape_array_center_subelem[isub][6] = 0.125*(1+px)*(1+py)*(1+pz);
+          shape_array_center_subelem[isub][7] = 0.125*(1-px)*(1+py)*(1+pz);
+          isub++;
+        }
+      } else {
+        shape_array_center_subelem[isub][0] = 0.25*(1-px)*(1-py);
+        shape_array_center_subelem[isub][1] = 0.25*(1+px)*(1-py);
+        shape_array_center_subelem[isub][2] = 0.25*(1+px)*(1+py);
+        shape_array_center_subelem[isub][3] = 0.25*(1-px)*(1+py);
+        isub++;
+      }
+    }
+  }
+}
+
+
+/* -----------------------------------
+   update all local element center coordinates from node coordinates
+   to be called by Fix after integrating node positions
+   ------------------------------------*/
+
+void ElementVecRHB::update_center_coord()
+{
+
+  // zero center coords of elements
+
+  size_t nbytes = sizeof(double) * element->nlocal;
+  if (nbytes) {
+    memset(&x[0][0],0,3*nbytes);
+  }
+
+  // update center coords of elements
+
+  for (int i = 0; i < element->nlocal; i++) {
+    for (int j = 0; j < npe; j++) {
+      x[i][0] += nodex[i][j][0];
+      x[i][1] += nodex[i][j][1];
+      x[i][2] += nodex[i][j][2];
+    }
+    x[i][0] = x[i][0]/npe;
+    x[i][1] = x[i][1]/npe;
+    x[i][2] = x[i][2]/npe;
+  }
+}
+
+/* -----------------------------------
+   update local element I node idim coordinate 
+   from center idim coordinate
+   ------------------------------------*/
+
+void ElementVecRHB::update_node_coord(int i, int idim)
+{
+  double xtmp = 0.0;
+  for (int j = 0; j < npe; j++)
+    xtmp += nodex[i][j][idim];
+  xtmp = x[i][idim] - xtmp/npe;
+  for (int j = 0; j < npe; j++) 
+    nodex[i][j][idim] += xtmp;
+}
+
+/* -----------------------------------
+   update all local element node coordinates 
+   from center coordinates
+   ------------------------------------*/
+
+void ElementVecRHB::update_node_coord()
+{
+  double xtmp,ytmp,ztmp;
+  for (int i = 0; i < element->nlocal; i++) {
+    xtmp = ytmp = ztmp = 0.0;
+    for (int j = 0; j < npe; j++) {
+      xtmp += nodex[i][j][0];
+      ytmp += nodex[i][j][1];
+      ztmp += nodex[i][j][2];
+    }
+    xtmp = x[i][0] - xtmp/npe;
+    ytmp = x[i][1] - ytmp/npe;
+    ztmp = x[i][2] - ztmp/npe;
+    for (int j = 0; j < npe; j++) {
+      nodex[i][j][0] += xtmp;
+      nodex[i][j][1] += ytmp;
+      nodex[i][j][2] += ztmp;
+    }
+  }
+}
+
+/* --------------------------------------------------------------
+   discritize element I into discrete atoms
+   to be called by disc_element command
+   return number of atoms created
+   ---------------------------------------------------------------*/
+
+int ElementVecRHB::element2atom(int i) 
+{
+
+  // get the coordinates of interpolated atom k
+  // move last element to element i
+
+  int ietype = etype[i];
+  int ictype = ctype[i];
+  double coord[3];
+  for (int iintpl = 0; iintpl < nintpl[ietype]; iintpl++) {
+    coord[0] = 0.0;
+    coord[1] = 0.0;
+    coord[2] = 0.0;
+    for (int inode = 0; inode < npe; inode++) 
+      for (int idim = 0; idim < 3; idim++)
+        coord[idim] += shape_array[ietype][iintpl][inode]*nodex[i][inode][idim];
+    atom->avec->create_atom(coord,ictype,0); 
+  }
+
+  copy(--element->nlocal,i,1);
+  return nintpl[ietype];
+}
+
+/* --------------------------------------------------------------
+   discritize element I into smaller elements with new etype and same ctype
+   to be called by disc_element command
+   return number of elements added
+   ---------------------------------------------------------------*/
+
+int ElementVecRHB::element2element(int i, int ietype_new, tagint id_offset) 
+{
+
+  // get the coordinates of interpolated atom k
+  // move last element to element i
+
+  int ietype = etype[i];
+  int ictype = ctype[i];
+
+  // number of new elements along each direction
+
+  int ne[3];
+  tagint itag = tag[i];
+  tagint mytag;
+  double **nodecoord;
+  memory->create(nodecoord,8,3,"evec:nodecoord");
+  double *coord = new double[3];            // coords of center
+  int iintpl;
+  int d[8][3] = {{0,0,0},
+    {1,0,0},
+    {1,1,0},
+    {0,1,0},
+    {0,0,1},
+    {1,0,1},
+    {1,1,1},
+    {0,1,1}};
+
+  // check if element i can be divided evenly
+
+  for (int idim = 0; idim < 3; idim++) 
+    if (naae[ietype][idim] % naae[ietype_new][idim]) 
+      error->one(FLERR,"Cannot divide elements evenly");
+
+  int n = 0;
+  for (int ix = 0; ix < naae[ietype][0]; ix += naae[ietype_new][0])
+    for (int iy = 0; iy < naae[ietype][1]; iy += naae[ietype_new][1])
+      if (domain->dimension == 3) {
+        for (int iz = 0; iz < naae[ietype][2]; iz += naae[ietype_new][2]) {
+
+
+          // interpolate new node coords from element I
+
+          coord[0] = coord[1] = coord[2] = 0.0;
+
+          for (int node = 0; node < 8; node++) { 
+
+            iintpl = (ix + d[node][0]*(naae[ietype_new][0]-1))*naae[ietype][1]*naae[ietype][2] 
+              + (iy + d[node][1]*(naae[ietype_new][1]-1))*naae[ietype][2] 
+              + (iz + d[node][2]*(naae[ietype_new][2]-1));
+
+            for (int idim = 0; idim < 3; idim++) {
+              nodecoord[node][idim] = 0.0;
+              for (int inode = 0; inode < 8; inode++) 
+                nodecoord[node][idim] += nodex[i][inode][idim]*shape_array[ietype][iintpl][inode];
+              coord[idim] += nodecoord[node][idim];
+            }
+          } 
+
+          coord[0] /= 8; 
+          coord[1] /= 8; 
+          coord[2] /= 8; 
+
+          // first element will have the same tag as old element
+          // other elements will start from id_offset and increment by apc
+          // this will ensure cluster ordering for multiple atoms per node cluster case
+          // if id_offset = 0, set mytag = 0;
+
+          if (id_offset) {
+            if (n) mytag = id_offset + (n-1)*apc;
+            else mytag = itag;
+          } else mytag = 0;
+
+          create_element(coord,nodecoord,ietype_new,ictype,mytag);
+          n++;
+        }
+
+      } else {
+
+        // interpolate new node coords from element I
+
+        coord[0] = coord[1] = coord[2] = 0.0;
+
+        for (int node = 0; node < 4; node++) { 
+          for (int idim = 0; idim < 2; idim++) 
+            nodecoord[node][idim] = 0.0;
+
+          iintpl = (ix + d[node][0]*(naae[ietype_new][0]-1))*naae[ietype][1]
+            + (iy + d[node][1]*(naae[ietype_new][1]-1));
+
+          for (int idim = 0; idim < 2; idim++) {
+            for (int inode = 0; inode < 4; inode++) 
+              nodecoord[node][idim] += nodex[i][inode][idim]*shape_array[ietype][iintpl][inode];
+            coord[idim] += nodecoord[node][idim];
+          }
+          nodecoord[node][3] = 0.0;
+        }
+
+        coord[0] /= 4; 
+        coord[1] /= 4; 
+
+        // first element will have the same tag as old element
+        // other elements will start from id_offset and increment by apc
+        // this will ensure cluster ordering for multiple atoms per node cluster case
+        // if id_offset = 0, set mytag = 0;
+
+        if (id_offset) {
+          if (n) mytag = id_offset + (n-1)*apc;
+          else mytag = itag;
+        } else mytag = 0;
+
+        create_element(coord,nodecoord,ietype_new,ictype,mytag);
+        n++;
+      }
+
+  // init per-element fix/compute/variable values for created elements
+
+  element->data_fix_compute_variable(element->nlocal-n,element->nlocal);
+
+  // remove element I by replacing it with last element in list
+
+  copy(--element->nlocal,i,1);
+  return n;
+  memory->destroy(nodecoord);
+  delete [] coord;
+}
+
+/*-------------------------------------------------------------*/
+
+void ElementVecRHB::check_element_size()
+{
+  double max = 0.0;
+  double max_array[3];
+  double max_diag = 0.0;
+  int i,j,k;
+  int nlocal = element->nlocal;
+  double delx,dely,delz;
+  double maxcoord,mincoord;
+  int ndim = domain->dimension;
+
+  // calculate the size of the element
+
+  max_array[0] = max_array[1] = max_array[2] = 0.0;
+  for (i = 0; i < nlocal; i++) {
+
+    // element x y z size for ghost cutoff
+
+    elem_size[i] = 0.0;
+    for (k = 0; k < ndim; k++) {
+      maxcoord = -BIG;
+      mincoord = BIG;
+      for (j = 0; j < npe; j++) {
+        maxcoord = MAX(maxcoord,nodex[i][j][k]);
+        mincoord = MIN(mincoord,nodex[i][j][k]);
+      }
+      max_array[k] = MAX(max_array[k],maxcoord-mincoord);
+      elem_size[i] = MAX(elem_size[i],maxcoord-mincoord);
+    }
+    if (elem_size[i] == 0.0) error->one(FLERR,"Negative element size");
+    if (initial_size[i] == 0.0) initial_size[i] = elem_size[i];
+    max = MAX(max,elem_size[i]);
+
+    // max diagonal size for neighboring cutoffs
+
+    if (ndim == 3) {
+      for (j = 0; j < 4; j++) {
+        if (j < 2) {
+          delx = nodex[i][j][0] - nodex[i][j+6][0];
+          dely = nodex[i][j][1] - nodex[i][j+6][1];
+          delz = nodex[i][j][2] - nodex[i][j+6][2];
+        } else {
+          delx = nodex[i][j][0] - nodex[i][j+2][0];
+          dely = nodex[i][j][1] - nodex[i][j+2][1];
+          delz = nodex[i][j][2] - nodex[i][j+2][2];
+        }
+        max_diag = MAX(max_diag,sqrt(delx*delx + dely*dely + delz*delz));
+      }
+    } else {
+      for (j = 0; j < 2; j++) {
+        delx = nodex[i][j][0] - nodex[i][j+2][0];
+        dely = nodex[i][j][1] - nodex[i][j+2][1];
+        max_diag = MAX(max_diag,sqrt(delx*delx + dely*dely));
+      }
+    }
+  }
+
+  // update element->max_size
+
+  MPI_Allreduce(&max,&element->max_size,1,MPI_DOUBLE,MPI_MAX,world);
+  MPI_Allreduce(max_array,element->max_size_array,3,MPI_DOUBLE,MPI_MAX,world);
+  MPI_Allreduce(&max_diag,&element->max_diag_size,1,MPI_DOUBLE,MPI_MAX,world);
+
+  // check element deformation
+
+  for (i = 0; i < nlocal; i++) 
+    if (elem_size[i]/initial_size[i] > element->maxelemchange || 
+        initial_size[i]/elem_size[i] > element->maxelemchange) {
+      char *errstr = new char[100];
+      sprintf(errstr,"Element ID %d deformed by more than %3.1f times, oldsize = %g, newsize = %g",
+          tag[i],element->maxelemchange,initial_size[i],elem_size[i]);
+      error->one(FLERR,errstr);
+      delete [] errstr;
+    }
+
+}
+
+/* ----------------------------------------------------------------------
+   return # of bytes of allocated memory
+   ------------------------------------------------------------------------- */
+
+bigint ElementVecRHB::memory_usage()
+{
+  bigint bytes = 0;
+
+  if (element->memcheck("tag")) bytes += memory->usage(tag,nmax);
+  if (element->memcheck("nodetag")) bytes += memory->usage(nodetag,nmax,npe);
+  if (element->memcheck("etype")) bytes += memory->usage(etype,nmax);
+  if (element->memcheck("ctype")) bytes += memory->usage(ctype,nmax);
+  if (element->memcheck("mask")) bytes += memory->usage(mask,nmax);
+  if (element->memcheck("nodemask")) bytes += memory->usage(nodemask,nmax,npe);
+  if (element->memcheck("image")) bytes += memory->usage(image,nmax);
+  if (element->memcheck("x")) bytes += memory->usage(x,nmax,3);
+  if (element->memcheck("slip_plane")) bytes += memory->usage(slip_plane,nmax,3,3);
+  if (element->memcheck("cell_size")) bytes += memory->usage(cell_size,nmax,3);
+  if (element->memcheck("nodex")) bytes += memory->usage(nodex,nmax,npe,3);
+  if (element->memcheck("nodev")) bytes += memory->usage(nodev,nmax,npe,3);
+  if (element->memcheck("nodef")) bytes += memory->usage(nodef,nmax,npe,3);
+
+  bytes += memory->usage(intg,element->netypes+1,element->maxintg,3);
+
+  return bytes;
+}
+
+/* ----------------------------------------------------------------------
+   update internal slip_plane (axes) of all elements
+   slip_plane is defined as unit normal vector of the plane
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::update_slip_plane()
+{
+  double xnorm,ynorm,znorm;
+  double xdir[3],ydir[3],zdir[3];
+  for (int i = 0; i < element->nlocal; i++) {
+    if (domain->dimension == 3) {
+      for (int j = 0; j < 3; j++) {
+        xdir[j] = 0.25*
+          (nodex[i][1][j] - nodex[i][0][j] + 
+           nodex[i][2][j] - nodex[i][3][j] +
+           nodex[i][5][j] - nodex[i][4][j] +
+           nodex[i][6][j] - nodex[i][7][j]);
+        ydir[j] = 0.25*
+          (nodex[i][3][j] - nodex[i][0][j] +
+           nodex[i][2][j] - nodex[i][1][j] +
+           nodex[i][7][j] - nodex[i][4][j] +
+           nodex[i][6][j] - nodex[i][5][j]);
+        zdir[j] = 0.25*
+          (nodex[i][4][j] - nodex[i][0][j] +
+           nodex[i][7][j] - nodex[i][3][j] +
+           nodex[i][5][j] - nodex[i][1][j] +
+           nodex[i][6][j] - nodex[i][2][j]);
+      }
+    } else {
+      for (int j = 0; j < 2; j++) {
+        xdir[j] = 0.5*
+          (nodex[i][2][j] - nodex[i][1][j] + 
+           nodex[i][3][j] - nodex[i][4][j]);
+        ydir[j] = 0.5*
+          (nodex[i][4][j] - nodex[i][1][j] +
+           nodex[i][3][j] - nodex[i][2][j]);
+        zdir[j] = 0.0;
+      }
+      xdir[2] = 0.0;
+      ydir[2] = 0.0;
+      zdir[2] = 1.0;
+    }
+
+    // calculate cell sizes and
+    // normalize vectors
+
+    xnorm = norm3(xdir);
+    ynorm = norm3(ydir);
+    znorm = norm3(zdir);
+    cross3(ydir,zdir,slip_plane[i][0]);
+    cross3(zdir,xdir,slip_plane[i][1]);
+    cross3(xdir,ydir,slip_plane[i][2]);
+    norm3(slip_plane[i][0]);
+    norm3(slip_plane[i][1]);
+    norm3(slip_plane[i][2]);
+    cell_size[i][0] = xnorm*fabs(dot3(xdir,slip_plane[i][0]));
+    cell_size[i][1] = ynorm*fabs(dot3(ydir,slip_plane[i][1]));
+    cell_size[i][2] = znorm*fabs(dot3(zdir,slip_plane[i][2]));
+    //if (tag[i] == 241) {
+    //  fprintf(screen,"xdir = %g %g %g\n",xdir[0],xdir[1],xdir[2]);
+    //  fprintf(screen,"ydir = %g %g %g\n",ydir[0],ydir[1],ydir[2]);
+    //  fprintf(screen,"zdir = %g %g %g\n",zdir[0],zdir[1],zdir[2]);
+    //  fprintf(screen,"xyslipplane = %g %g %g\n",slip_plane[i][2][0],slip_plane[i][2][1],slip_plane[i][2][2]);
+    //  fprintf(screen,"xzslipplane = %g %g %g\n",slip_plane[i][1][0],slip_plane[i][1][1],slip_plane[i][1][2]);
+    //  fprintf(screen,"yzslipplane = %g %g %g\n",slip_plane[i][0][0],slip_plane[i][0][1],slip_plane[i][0][2]);
+    //  error->all(FLERR,"TEST"); 
+    //}
+  }
+}
+
+/* ----------------------------------------------------------------------
+   interpolate values from nodevalues in element I at interpolated atom J
+   n = number of values
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::interpolate(double *value, double ***nodevalue, int i, int j, int n) 
+{
+  int ietype = etype[i];
+  for (int k = 0; k < n; k++) {
+    value[k] = 0.0;
+    if (domain->dimension == 3)
+      for (int l = 0; l < 8; l++) 
+        value[k] += shape_array[ietype][j][l]*nodevalue[i][l][k];
+    else
+      for (int l = 0; l < 4; l++) 
+        value[k] += shape_array[ietype][j][l]*nodevalue[i][l][k];
+  }
+}
+
+/* ----------------------------------------------------------------------
+   add atom plane next to elements
+   Called from input add_atoms command
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::add_atoms(int narg, char **arg)
+{
+  if (narg != 3) error->all(FLERR,"Illegal add_atoms command");
+
+  int igroup = group->find(arg[0]);
+  if (igroup == -1) error->all(FLERR,"Could not find add_atoms group ID");
+  int groupbit = group->bitmask[igroup];
+
+  // check which type to modify
+
+  int n1list[4],n2list[4],dim0,dim1,dim2;
+  if (strcmp(arg[1],"+x") == 0) {
+    n1list[0] = 1; n2list[0] = 0;
+    n1list[1] = 2; n2list[1] = 3;
+    n1list[2] = 6; n2list[2] = 7;
+    n1list[3] = 5; n2list[3] = 4;
+    dim0 = 0; dim1 = 1; dim2 = 2;
+  } else if (strcmp(arg[1],"-x") == 0) { 
+    n1list[0] = 0; n2list[0] = 1;
+    n1list[1] = 3; n2list[1] = 2;
+    n1list[2] = 7; n2list[2] = 6;
+    n1list[3] = 4; n2list[3] = 5;
+    dim0 = 0; dim1 = 1; dim2 = 2;
+  } else if (strcmp(arg[1],"+y") == 0) { 
+    n1list[0] = 2; n2list[0] = 1;
+    n1list[1] = 3; n2list[1] = 0;
+    n1list[2] = 7; n2list[2] = 4;
+    n1list[3] = 6; n2list[3] = 5;
+    dim0 = 1; dim1 = 0; dim2 = 2;
+  } else if (strcmp(arg[1],"-y") == 0) { 
+    n1list[0] = 1; n2list[0] = 2;
+    n1list[1] = 0; n2list[1] = 3;
+    n1list[2] = 4; n2list[2] = 7;
+    n1list[3] = 5; n2list[3] = 6;
+    dim0 = 1; dim1 = 0; dim2 = 2;
+  } else if (strcmp(arg[1],"+z") == 0) { 
+    n1list[0] = 4; n2list[0] = 0;
+    n1list[1] = 5; n2list[1] = 1;
+    n1list[2] = 6; n2list[2] = 2;
+    n1list[3] = 7; n2list[3] = 3;
+    dim0 = 2; dim1 = 0; dim2 = 1;
+  } else if (strcmp(arg[1],"-z") == 0) { 
+    n1list[0] = 0; n2list[0] = 4;
+    n1list[1] = 1; n2list[1] = 5;
+    n1list[2] = 2; n2list[2] = 6;
+    n1list[3] = 3; n2list[3] = 7;
+    dim0 = 2; dim1 = 0; dim2 = 1;
+  } else error->all(FLERR,"Illegal modify_elements command");
+
+  int nlayers = universe->inumeric(FLERR,arg[2]);
+
+  // modify elements and add atoms
+
+  double coord[3];
+  int iintpl,nx,ny,nz;
+  int natoms_added = 0;
+  int nlocal_previous = atom->nlocal;
+  for (int i = 0; i < element->nlocal; i++) 
+    if (mask[i] & groupbit) {
+      nx = naae[etype[i]][0];
+      ny = naae[etype[i]][1];
+      nz = naae[etype[i]][2];
+      for (int n = 0; n < nlayers; n++) {
+        for (int j = 0; j < naae[etype[i]][dim1]; j++) 
+          for (int k = 0; k < naae[etype[i]][dim2]; k++) {
+            iintpl = (j*(dim1 == 2) + k*(dim2 == 2) + (nz-1)*((dim1!=2)&&(dim2!=2)&&(n1list[0]==4)))
+              + nz * (j*(dim1 == 1) + k*(dim2 == 1) + (ny-1)*((dim1!=1)&&(dim2!=1)&&(n1list[0]==2)))
+              + ny * nz * (j*(dim1 == 0) + k*(dim2 == 0) + (nx-1)*((dim1!=0)&&(dim2!=0)&&(n1list[0]==1)));
+            coord[0] = coord[1] = coord[2] = 0.0;
+            for (int l = 0; l < npe; l++) {
+              coord[0] += shape_array[etype[i]][iintpl][l]*nodex[i][l][0];
+              coord[1] += shape_array[etype[i]][iintpl][l]*nodex[i][l][1];
+              coord[2] += shape_array[etype[i]][iintpl][l]*nodex[i][l][2];
+            }
+            atom->avec->create_atom(coord,ctype[i],0); 
+            natoms_added++;
+          }
+
+        for (int j = 0; j < 4; j++) 
+          for (int k = 0; k < 3; k++) 
+            nodex[i][n1list[j]][k] += (nodex[i][n2list[j]][k] - nodex[i][n1list[j]][k])/naae[etype[i]][dim0];
+      }
+    }
+
+  // init per-atom fix/compute/variable values for created atoms
+
+  atom->data_fix_compute_variable(nlocal_previous,atom->nlocal);
+
+  // add new tags to atoms
+
+  atom->tag_extend();
+  int total_atoms_added;
+  MPI_Allreduce(&natoms_added,&total_atoms_added,1,MPI_INT,MPI_SUM,world);
+  atom->natoms += total_atoms_added;
+  if (comm->me == 0) fprintf(screen," %d atoms added by add_atoms command.\n",total_atoms_added);
+}
+
+/* ----------------------------------------------------------------------
+   create a list of template elements from lattice within given bounds
+   return total number of template elements
+   called by create_elements command
+   ------------------------------------------------------------------------- */
+
+bigint ElementVecRHB::create_element_template(
+    int klo, int khi, int jlo, int jhi, int ilo, int ihi, 
+    int ietype, int *basisctype, double **xlist, int *clist)
+{
+  bigint n = 0;
+
+  int nbasis = domain->lattice->nbasis;
+  double **basis = domain->lattice->basis;
+  int i,j,k,m;
+  klo = (klo/naae[ietype][2]-1)*naae[ietype][2];
+  jlo = (jlo/naae[ietype][1]-1)*naae[ietype][1];
+  ilo = (ilo/naae[ietype][0]-1)*naae[ietype][0];
+  for (k = klo; k <= khi; k += naae[ietype][2]) 
+    for (j = jlo; j <= jhi; j += naae[ietype][1]) 
+      for (i = ilo; i <= ihi; i += naae[ietype][0]) 
+        for (m = 0; m < nbasis; m++) {
+          xlist[n][0] = i + basis[m][0];
+          xlist[n][1] = j + basis[m][1];
+          xlist[n][2] = k + basis[m][2];
+          clist[n] = basisctype[m];
+
+          // convert from lattice coords to box coords
+
+          domain->lattice->lattice2box(xlist[n][0],xlist[n][1],xlist[n][2]);
+          n++;
+        }
+
+  return n;
+}
+
+/* ----------------------------------------------------------------------
+   called from fix_adaptive to split element I along 'idim' direction 
+   flag = 0: first pass, check if element need to be splitted and request new etype. Element is not splitted yet
+   flag = 1: second pass, new etype has been created and element can now be splitted
+   return 0 if element does not need splitted or discretized to all atoms
+   1 if 1 new element created
+   2 if 2 new elements created
+   ------------------------------------------------------------------------- */
+
+int ElementVecRHB::split_element(int i, int idim, double iplane, int split, int flag, double *plane_id)
+{
+  int split_flag = 0;
+  int ietype = etype[i];
+  int ictype = ctype[i];
+  tagint itag = tag[i];
+  double ncells = naae[ietype][idim] - 1;
+  double coord[3];
+  int nx = naae[ietype][0]; 
+  int ny = naae[ietype][1]; 
+  int nz = naae[ietype][2]; 
+  int index_offset = (idim==2) + nz*(idim==1) + ny*nz*(idim==0);
+  int info[6];
+  info[0] = nx;
+  info[1] = ny;
+  info[2] = nz;
+  info[3] = niae[ietype][0]; 
+  info[4] = niae[ietype][1]; 
+  info[5] = niae[ietype][2]; 
+
+  int clo = static_cast<int> (iplane - ncells/2);
+  int chi = static_cast<int> (iplane + ncells/2);
+
+  // check if element doesn't need splitting 
+
+  if (split < clo || split >= chi) 
+    return split_flag;
+
+  // if flag = 0, request new etype if needed,
+  // not actually splitting yet
+
+  if (flag == 0) {
+
+    split_flag = 1;
+    // if has only one plane, discretize into atoms
+    // 2D and 3D elements can't be in the same simulation yet
+
+
+
+    // lower element   
+
+    if (split > clo) {
+
+      info[idim] = split - clo + 1;
+
+      // limit the number of integration points to the number of unit cells
+
+      info[3+idim] = MIN(info[idim],niae[ietype][idim]);
+
+      // request new etype
+
+      request_new_etype(info);
+    }
+
+    // upper element
+
+    if (split+1 < chi) {
+
+      info[idim] = chi - split;
+
+      // limit the number of integration points to the number of unit cells
+
+      info[3+idim] = MIN(info[idim],niae[ietype][idim]);
+      // request new etype
+
+      request_new_etype(info);
+    }
+
+    // if flag != 0, split elements
+
+  } else {
+    double **nodecoord;
+    memory->create(nodecoord,npe,3,"evec:nodecoord");
+    int *iintpl_list = new int[npe];
+    int *n2ia = element->n2ia[ietype];
+
+    // lower element
+    // if has only one plane, discretize into atoms
+
+    if (split == clo) {
+      int hi[3],iintpl;
+      hi[0] = nx;
+      hi[1] = ny;
+      hi[2] = nz;
+      hi[idim] = 1;
+      for (int ii = 0; ii < hi[0]; ii ++)
+        for (int jj = 0; jj < hi[1]; jj ++)
+          for (int kk = 0; kk < hi[2]; kk ++) {
+            iintpl = kk + jj*nz + ii*nz*ny;
+            interpolate(coord,nodex,i,iintpl,3);
+            atom->avec->create_atom(coord,ictype,0);
+
+            // pass on stored data for new atom J from fix/compute/variable and velocity
+
+            int j = atom->nlocal-1;
+            atom->data_pass_on_fix_compute_variable(j,i,iintpl);
+            interpolate(atom->v[j],nodev,i,iintpl,3);
+          } 
+    } else {
+      split_flag++;
+      info[idim] = split - clo + 1;
+
+      // limit the number of integration points to the number of unit cells
+
+      info[3+idim] = MIN(info[idim],niae[ietype][idim]);
+
+      int myetype = find_etype(info);
+      if (myetype == 0) error->one(FLERR,"Etype not defined yet");
+
+      coord[0] = coord[1] = coord[2] = 0;
+
+      if (domain->dimension == 3) {
+        for (int ii = 0; ii < 4; ii++) {
+
+          // lower set of nodes stays are the same as the origional element
+          // calculate upper set of nodes by scaling along edges
+
+          int lnode = node_set_3D[idim][0][ii];
+          int unode = node_set_3D[idim][1][ii]; 
+
+          iintpl_list[lnode] = n2ia[lnode];
+          iintpl_list[unode] = n2ia[lnode] + (info[idim]-1)*index_offset;
+
+          for (int jj = 0; jj < 3; jj++) {
+            nodecoord[lnode][jj] = nodex[i][lnode][jj];
+            nodecoord[unode][jj] = nodecoord[lnode][jj] + 
+              (nodex[i][unode][jj]-nodex[i][lnode][jj])
+              *(info[idim]-1)/(naae[ietype][idim]-1);
+            coord[jj] += nodecoord[lnode][jj] + nodecoord[unode][jj];
+          }
+        }
+        coord[0] /= 8;
+        coord[1] /= 8;
+        coord[2] /= 8;
+        create_element(coord,nodecoord,myetype,ictype,0);
+
+        // pass on stored data for new element in fix/compute/variable and velocity
+
+        int j = element->nlocal-1;
+        element->data_pass_on_fix_compute_variable(j,i,iintpl_list);
+        for (int ii = 0; ii < 8; ii++)
+          interpolate(nodev[j][ii],nodev,i,iintpl_list[ii],3);
+
+      } else {
+        for (int ii = 0; ii < 2; ii++) {
+
+          // lower set of nodes stays are the same as the origional element
+          // calculate upper set of nodes by scaling along edges
+
+          int lnode = node_set_2D[idim][0][ii];
+          int unode = node_set_2D[idim][1][ii]; 
+
+          iintpl_list[lnode] = n2ia[lnode];
+          iintpl_list[unode] = n2ia[lnode] + (info[idim]-1)*index_offset;
+
+          for (int jj = 0; jj < 2; jj++) {
+            nodecoord[lnode][jj] = nodex[i][lnode][jj];
+            nodecoord[unode][jj] = nodecoord[lnode][jj] + 
+              (nodex[i][unode][jj]-nodex[i][lnode][jj])
+              *(info[idim]-1)/(naae[ietype][idim]-1);
+            coord[jj] += nodecoord[lnode][jj] + nodecoord[unode][jj];
+          }
+        }
+        coord[0] /= 4;
+        coord[1] /= 4;
+
+        // z direction coord stay the same
+
+        coord[2] = x[i][2];       
+        for (int ii = 0; ii < 4; ii++) 
+          nodecoord[ii][2] = nodex[i][ii][2];
+        create_element(coord,nodecoord,ietype,ictype,0);
+        int j = element->nlocal-1;
+        element->data_pass_on_fix_compute_variable(j,i,iintpl_list);
+        for (int ii = 0; ii < 4; ii++)
+          interpolate(nodev[j][ii],nodev,i,iintpl_list[ii],3);
+
+      }
+
+      // assign new plane_id for new element
+
+      plane_id[element->nlocal-1] = static_cast<double> (split+clo);
+      plane_id[element->nlocal-1] /= 2;
+    }
+
+    // upper element
+    // if has only one plane, discretize into atoms
+
+    if (split+1 == chi) {
+      int lo[3],iintpl;
+      lo[0] = lo[1] = lo[2] = 0;
+      lo[idim] = naae[ietype][idim]-1;
+      for (int ii = lo[0]; ii < nx; ii ++)
+        for (int jj = lo[1]; jj < ny; jj ++)
+          for (int kk = lo[2]; kk < nz; kk ++) {
+            iintpl = kk + jj*nz + ii*nz*ny;
+            interpolate(coord,nodex,i,iintpl,3);
+            atom->avec->create_atom(coord,ictype,0);
+            int j = atom->nlocal-1;
+            atom->data_pass_on_fix_compute_variable(j,i,iintpl);
+            interpolate(atom->v[j],nodev,i,iintpl,3);
+          } 
+
+    } else {
+
+      split_flag++;
+      info[idim] = chi - split;
+
+      // limit the number of integration points to the number of unit cells
+
+      info[3+idim] = MIN(info[idim],niae[ietype][idim]);
+
+      int myetype = find_etype(info);
+      if (myetype == 0) error->one(FLERR,"Etype not defined yet");
+
+      coord[0] = coord[1] = coord[2] = 0;
+      if (domain->dimension == 3) {
+        for (int ii = 0; ii < 4; ii++) {
+
+          // upper set of nodes stays are the same as the origional element
+          // calculate lower set of nodes by scaling along edges
+
+          int lnode = node_set_3D[idim][0][ii];
+          int unode = node_set_3D[idim][1][ii]; 
+
+          iintpl_list[unode] = n2ia[unode];
+          iintpl_list[lnode] = n2ia[unode] - (info[idim]-1)*index_offset;
+
+          for (int jj = 0; jj < 3; jj++) {
+            nodecoord[unode][jj] = nodex[i][unode][jj];
+            nodecoord[lnode][jj] = nodecoord[unode][jj] + 
+              (nodex[i][lnode][jj]-nodex[i][unode][jj])
+              *(info[idim]-1)/(naae[ietype][idim]-1);
+            coord[jj] += nodecoord[lnode][jj] + nodecoord[unode][jj];
+          }
+        }
+        coord[0] /= 8;
+        coord[1] /= 8;
+        coord[2] /= 8;
+        create_element(coord,nodecoord,myetype,ictype,0);
+        int j = element->nlocal-1;
+        element->data_pass_on_fix_compute_variable(j,i,iintpl_list);
+        for (int ii = 0; ii < 8; ii++)
+          interpolate(nodev[j][ii],nodev,i,iintpl_list[ii],3);
+
+      } else {
+        for (int ii = 0; ii < 2; ii++) {
+
+          // lower set of nodes stays are the same as the origional element
+          // calculate upper set of nodes by scaling along edges
+
+          int lnode = node_set_2D[idim][0][ii];
+          int unode = node_set_2D[idim][1][ii]; 
+
+          iintpl_list[unode] = n2ia[unode];
+          iintpl_list[lnode] = n2ia[unode] - (info[idim]-1)*index_offset;
+
+          for (int jj = 0; jj < 2; jj++) {
+            nodecoord[unode][jj] = nodex[i][unode][jj];
+            nodecoord[lnode][jj] = nodecoord[unode][jj] + 
+              (nodex[i][lnode][jj]-nodex[i][unode][jj])
+              *(info[idim]-1)/(naae[ietype][idim]-1);
+            coord[jj] += nodecoord[lnode][jj] + nodecoord[unode][jj];
+          }
+        }
+        coord[0] /= 4;
+        coord[1] /= 4;
+
+        // z direction coord stay the same
+
+        coord[2] = x[i][2];       
+        for (int ii = 0; ii < 4; ii++) 
+          nodecoord[ii][2] = nodex[i][ii][2];
+
+        create_element(coord,nodecoord,ietype,ictype,0);
+        int j = element->nlocal-1;
+        element->data_pass_on_fix_compute_variable(j,i,iintpl_list);
+        for (int ii = 0; ii < 4; ii++)
+          interpolate(nodev[j][ii],nodev,i,iintpl_list[ii],3);
+
+      }
+
+      // assign new plane_id for new element
+
+      plane_id[element->nlocal-1] = static_cast<double> (split+chi+1);
+      plane_id[element->nlocal-1] /= 2;
+
+    }
+
+    // delete element I
+
+    copy(element->nlocal-1,i,1);
+    element->nlocal--;
+    delete [] iintpl_list;
+    memory->destroy(nodecoord);
+  }
+  return split_flag;
+}
+
+/* ----------------------------------------------------------------------
+   request new etype
+   return if etype already exist or requested
+   otherwise add to list of requested etype
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::request_new_etype(int *info)
+{
+  if (find_etype(info)) return;
+
+  int n = nrequested_etype;
+
+  for (int i = 0; i < n; i++) 
+    if (requested_etype[i*6] == info[0] &&
+        requested_etype[i*6+1] == info[1] &&
+        requested_etype[i*6+2] == info[2] &&
+        requested_etype[i*6+3] == info[3] &&
+        requested_etype[i*6+4] == info[4] &&
+        requested_etype[i*6+5] == info[5])
+      return;
+
+  // grow requested_etype array if needed
+
+  if (n == maxrequested_etype) {
+    maxrequested_etype *= 2;
+    memory->grow(requested_etype,maxrequested_etype*6,"evec:requested_etype");
+  }
+
+  // add requested etype to the list
+
+  for (int i = 0; i < 6; i++)
+    requested_etype[n*6+i] = info[i];
+
+  nrequested_etype++;
+
+}
+
+/* ----------------------------------------------------------------------
+   find existing etype
+   return the index of etype if match
+   return 0 if no etype found
+   ------------------------------------------------------------------------- */
+
+int ElementVecRHB::find_etype(int *info)
+{
+  for (int i = 1; i <= element->netypes; i++)
+    if (info[0] == naae[i][0] && 
+        info[1] == naae[i][1] && 
+        info[2] == naae[i][2] && 
+        info[3] == niae[i][0] && 
+        info[4] == niae[i][1] && 
+        info[5] == niae[i][2])
+      return i;
+  return 0;
+}
+
+/* ----------------------------------------------------------------------
+   union all requested etype from all procs
+   add the requested etype
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::add_requested_etype()
+{
+  int nprocs = comm->nprocs;
+  int *recvcount = new int[nprocs];
+  int *recvbuf = new int[nprocs];
+  int *displs = new int[nprocs];
+  for (int i = 0; i < nprocs; i++) {
+    recvcount[i] = 1;
+    displs[i] = i;
+  }
+
+  MPI_Allgatherv(&nrequested_etype,1,MPI_INT,recvbuf,recvcount,displs,MPI_INT,world);
+
+  int sum = 0;
+  for (int i = 0; i < nprocs; i++) {
+    recvcount[i] = recvbuf[i]*6;
+    displs[i] = sum;
+    sum += recvcount[i];
+  }
+  int nrequests_all = sum/6;
+  int *requests_all = new int[sum];
+
+  MPI_Allgatherv(requested_etype,nrequested_etype*6,MPI_INT,
+      requests_all,recvcount,displs,MPI_INT,world);
+
+  char **newarg = new char*[9];
+  for (int i = 0; i < nrequests_all; i++) {
+    int *info = requests_all+i*6;
+    if (!find_etype(info)) {
+      for (int j = 0; j < 9; j++)
+        newarg[j] = new char[20];
+      sprintf(newarg[0],"%d",element->netypes+1);
+      sprintf(newarg[1],"interpolate");
+      sprintf(newarg[2],"%d",info[0]);
+      sprintf(newarg[3],"%d",info[1]);
+      sprintf(newarg[4],"%d",info[2]);
+      sprintf(newarg[5],"integration");
+      sprintf(newarg[6],"%d",info[3]);
+      sprintf(newarg[7],"%d",info[4]);
+      sprintf(newarg[8],"%d",info[5]);
+      element->add_etype(9,newarg);
+      for (int j = 0; j < 9; j++)
+        delete [] newarg[j];
+    }
+  }
+
+  // reset number of requested etype
+
+  nrequested_etype = 0;
+
+  // clean up
+
+  delete [] newarg; 
+  delete [] requests_all;
+  delete [] displs;
+  delete [] recvbuf;
+  delete [] recvcount;
+}
+
+/* ----------------------------------------------------------------------
+   check if element J surface K cut through element I
+   ------------------------------------------------------------------------- */
+
+int ElementVecRHB::check_split_elem(int i, int j, int surface, int &cut, int &cutdim)
+{
+  // look for node closed to element I
+  // project node coord onto each slip plane normal line
+  // if projection falls inside element --> need splitting
+
+  int jnode_closest,jnode,jj;
+  double delx,dely,delz,rsq;
+  double rsqmin = BIG;
+  double ix = x[i][0];
+  double iy = x[i][1];
+  double iz = x[i][2];
+  int ietype = etype[i];
+
+  cutdim = surface/2;
+  int dir = surface%2;
+  if (domain->dimension == 3) {
+    for (jj = 0; jj < 4; jj++) {
+      jnode = node_set_3D[cutdim][dir][jj];
+      delx = ix - nodex[j][jnode][0];
+      dely = iy - nodex[j][jnode][1];
+      delz = iz - nodex[j][jnode][2];
+      rsq = delx*delx + dely*dely + delz*delz;
+      if (rsq < rsqmin) { 
+        rsqmin = rsq;
+        jnode_closest = jnode;
+      }
+    }
+  } else {
+    for (jj = 0; jj < 2; jj++) {
+      jnode = node_set_2D[cutdim][dir][jj];
+      delx = ix - nodex[j][jnode][0];
+      dely = iy - nodex[j][jnode][1];
+      rsq = delx*delx + dely*dely;
+      if (rsq < rsqmin) { 
+        rsqmin = rsq;
+        jnode_closest = jnode;
+      }
+    }
+  }
+  double dist = dot3(slip_plane[i][cutdim],nodex[j][jnode_closest]) 
+    - dot3(slip_plane[i][cutdim],x[i]);
+  double a = cell_size[i][cutdim]/(naae[ietype][cutdim]-1);
+  double hi = cell_size[i][cutdim]/2 - a/2;
+  double lo = -hi;
+
+  if (dir) lo -= a;
+  else hi += a;
+  if (dist < lo || dist > hi) return 0;
+
+  cut = static_cast<int> ((dist-lo)/a);
+  cut++;
+  return 1;
+}
+
+/* ----------------------------------------------------------------------
+   called from fix_adaptive to split elements in list
+   return number of elements being splitted
+   ------------------------------------------------------------------------- */
+
+int ElementVecRHB::split_element(int **splitlist, int nsplit)
+{
+  int ietype,ictype;
+  int info[6];
+  int *ilist,**nelem_array,***cellsize_array;
+
+  // counter for number of elements being splitted
+ 
+  int n = 0;
+
+  memory->create(ilist,nsplit,"evec:ilist");
+  memory->create(nelem_array,nsplit,3,"evec:nelem");
+  memory->create(cellsize_array,nsplit,3,MAXSUB,"evec:cellsize");
+  int *nelem,**cellsize;
+  int ii = 0;
+  int i,icut,icutdim;
+
+  // first pass: check for new etypes
+  // loop through all splits in list
+  // each element might have several splits and
+  // they are all next to each other in splitlist
+
+  while (ii < nsplit) {
+    nelem = nelem_array[n];
+    cellsize = cellsize_array[n];
+    nelem[0] = nelem[1] = nelem[2] = 1;
+
+    i = splitlist[ii][0];
+
+    // apply first split to element I
+    
+    icut = splitlist[ii][1];
+    icutdim = splitlist[ii][2];
+    ilist[n] = i;
+    ietype = etype[i];
+    cellsize[0][0] = naae[ietype][0];
+    cellsize[1][0] = naae[ietype][1];
+    cellsize[2][0] = naae[ietype][2];
+    cellsize[icutdim][0] = icut;
+    cellsize[icutdim][1] = naae[ietype][icutdim]-icut;
+    nelem[icutdim]++;
+
+    // apply each additional split to element cellsize list if next split 
+    // still cut element I
+    
+    if (ii < nsplit-1) {
+      while (i == splitlist[ii+1][0]) {
+
+        icut = splitlist[ii+1][1];
+        icutdim = splitlist[ii+1][2];
+
+        if (nelem[icutdim] == MAXSUB) 
+          error->one(FLERR,"Too many split in one direction");
+        int sum = 0;
+
+        for (int l = 0; l < nelem[icutdim]; l++) {
+          if (icut > sum + cellsize[icutdim][l])
+            sum += cellsize[icutdim][l];
+          else if (icut < sum + cellsize[icutdim][l]) {
+            for (int m = l+1; m < nelem[icutdim]; m++) 
+              cellsize[icutdim][m+1] = cellsize[icutdim][m];
+            cellsize[icutdim][l] = icut-sum;
+            cellsize[icutdim][l+1] -= icut-sum;
+            nelem[icutdim]++;
+            break;
+          } else {
+            break;
+          }
+        }
+        ii++;
+        if (ii == nsplit-1) break;
+      }
+    }
+    for (int ix = 0; ix < nelem[0]; ix++) {
+      info[0] = cellsize[0][ix];
+      if (info[0] == 1) continue;
+      info[3] = MIN(info[0],niae[ietype][0]);
+      for (int iy = 0; iy < nelem[1]; iy++) {
+        info[1] = cellsize[1][iy];
+        if (info[1] == 1) continue;
+        info[4] = MIN(info[1],niae[ietype][1]);
+        for (int iz = 0; iz < nelem[2]; iz++) {
+          info[2] = cellsize[2][iz];
+          info[5] = MIN(info[2],niae[ietype][2]);
+          if (info[2] == 1 && domain->dimension == 3) 
+            continue;
+          request_new_etype(info);
+        }
+      }
+    }
+    n++;
+    ii++;
+  }
+
+  add_requested_etype();
+
+  // second pass: split elements
+
+  int index_offset[3],index_node0,iintpl;
+  int myetype,nx,ny,nz;
+  double coord[3],**nodecoord;
+  memory->create(nodecoord,npe,3,"evec:nodecoord");
+
+  // iintpl_list = list of intpl index in old element for each node of new element
+  
+  int *iintpl_list = new int[npe]; 
+
+  for (ii = 0; ii < n; ii++) {
+    i = ilist[ii];
+    ietype = etype[i];
+    nx = naae[ietype][0];
+    ny = naae[ietype][1];
+    nz = naae[ietype][2];
+    ictype = ctype[i];
+    nelem = nelem_array[ii];
+    cellsize = cellsize_array[ii];
+    index_offset[0] = index_offset[1] = index_offset[2] = 0;
+    index_node0 = 0;
+    for (int ix = 0; ix < nelem[0]; ix++) {
+      info[0] = cellsize[0][ix];
+      info[3] = MIN(info[0],niae[ietype][0]);
+      index_offset[0] = ny*nz*(cellsize[0][ix]-1);
+      for (int iy = 0; iy < nelem[1]; iy++) {
+        info[1] = cellsize[1][iy];
+        info[4] = MIN(info[1],niae[ietype][1]);
+        index_offset[1] = nz*(cellsize[1][iy]-1);
+        if (domain->dimension == 3) {
+          for (int iz = 0; iz < nelem[2]; iz++) {
+            info[2] = cellsize[2][iz];
+            info[5] = MIN(info[2],niae[ietype][2]);
+            index_offset[2] = (cellsize[2][iz]-1);
+            if (info[0] == 1) {
+              for (int iiy = 0; iiy < info[1]; iiy++)
+                for (int iiz = 0; iiz < info[2]; iiz++) 
+                  create_pass_on_atom(i,index_node0+iiz+iiy*nz,ictype,0);
+            } else if (info[1] == 1) {
+              for (int iix = 0; iix < info[0]; iix++) 
+                for (int iiz = 0; iiz < info[2]; iiz++) 
+                  create_pass_on_atom(i,index_node0+iiz+iix*ny*nz,ictype,0);
+            } else if (info[2] == 1) {
+              for (int iix = 0; iix < info[0]; iix++) 
+                for (int iiy = 0; iiy < info[1]; iiy++) 
+                  create_pass_on_atom(i,index_node0+iiy*nz+iix*ny*nz,ictype,0);
+            } else {
+              myetype = find_etype(info);
+              if (myetype == 0) error->one(FLERR,"Etype not defined yet");
+
+              // calculate intpl index in element I for each node of new element
+
+              iintpl_list[0] = index_node0; 
+              iintpl_list[1] = index_node0 + index_offset[0];
+              iintpl_list[2] = index_node0 + index_offset[0] 
+                + index_offset[1];
+              iintpl_list[3] = index_node0 + index_offset[1];
+              iintpl_list[4] = iintpl_list[0] + index_offset[2];
+              iintpl_list[5] = iintpl_list[1] + index_offset[2];
+              iintpl_list[6] = iintpl_list[2] + index_offset[2];
+              iintpl_list[7] = iintpl_list[3] + index_offset[2];
+              create_pass_on_element(i,iintpl_list,myetype,ictype,0);
+            }
+            index_node0 += index_offset[2]+1;
+          }
+          index_node0 += index_offset[1];
+        } else {
+          info[2] = info[5] = 1;
+          if (info[0] == 1) {
+            for (int iiy = 0; iiy < info[1]; iiy++)
+              create_pass_on_atom(i,index_node0+iiy,ictype,0);
+          } else if (info[1] == 1) {
+            for (int iix = 0; iix < info[0]; iix++) 
+              create_pass_on_atom(i,index_node0+iix*nyz,ictype,0);
+          } else {
+            myetype = find_etype(info);
+            if (myetype == 0) error->one(FLERR,"Etype not defined yet");
+            iintpl_list[0] = index_node0; 
+            iintpl_list[1] = index_node0 + index_offset[0];
+            iintpl_list[2] = index_node0 + index_offset[0] 
+              + index_offset[1];
+            iintpl_list[3] = index_node0 + index_offset[1];
+            create_pass_on_element(i,iintpl_list,myetype,ictype,0);
+          }
+          index_node0 += index_offset[1]+1;
+        }
+      }
+      index_node0 += index_offset[0];
+    }
+
+    // delete element I
+
+    copy(element->nlocal-1,i,1);
+    element->nlocal--;
+  }
+  memory->destroy(nelem_array); 
+  memory->destroy(cellsize_array);
+  memory->destroy(nodecoord);
+  delete [] iintpl_list;
+  return n;
+}
+
+/* ----------------------------------------------------------------------
+   create new element from an old element
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::create_pass_on_element(int i, int *iintpl_list, int ietype, int ictype, tagint itag)
+{
+  double **nodecoord,coord[3];
+  memory->create(nodecoord,npe,3,"evec:nodecoord");
+  coord[0] = coord[1] = coord[2] = 0;
+  if (domain->dimension == 3) 
+    for (int jj = 0; jj < 8; jj++) {
+      interpolate(nodecoord[jj],nodex,i,iintpl_list[jj],3);
+      coord[0] += nodecoord[jj][0];
+      coord[1] += nodecoord[jj][1];
+      coord[2] += nodecoord[jj][2];
+    }
+  else 
+    for (int jj = 0; jj < 4; jj++) {
+      interpolate(nodecoord[jj],nodex,i,iintpl_list[jj],3);
+      coord[0] += nodecoord[jj][0];
+      coord[1] += nodecoord[jj][1];
+      coord[2] += nodecoord[jj][2];
+    }
+  coord[0] /= npe;
+  coord[1] /= npe;
+  coord[2] /= npe;
+  create_element(coord,nodecoord,ietype,ictype,itag);
+
+  // pass on stored data for new element in fix/compute/variable and velocity
+  // new elements will be in the same group as old element
+
+  int j = element->nlocal-1;
+  element->data_pass_on_fix_compute_variable(j,i,iintpl_list);
+  mask[j] = mask[i];
+  if (domain->dimension == 3) 
+    for (int jj = 0; jj < 8; jj++)
+      interpolate(nodev[j][jj],nodev,i,iintpl_list[jj],3);
+  else
+    for (int jj = 0; jj < 4; jj++)
+      interpolate(nodev[j][jj],nodev,i,iintpl_list[jj],3);
+  memory->destroy(nodecoord);
+}
+
+/* ----------------------------------------------------------------------
+   create new atom from an old element
+   ------------------------------------------------------------------------- */
+
+void ElementVecRHB::create_pass_on_atom(int i, int iintpl, int itype, tagint itag)
+{
+  double coord[3];
+  interpolate(coord,nodex,i,iintpl,3);
+  atom->avec->create_atom(coord,itype,itag);
+
+  // pass on stored data for new element in fix/compute/variable and velocity
+  // new atoms will be in the same group as old element
+
+  int j = atom->nlocal-1;
+  atom->data_pass_on_fix_compute_variable(j,i,iintpl);
+  atom->mask[j] = mask[i];
+  interpolate(atom->v[j],nodev,i,iintpl,3);
+}
+

@@ -1,0 +1,110 @@
+#include <string.h>
+#include <stdlib.h>
+#include "element_vec.h"
+#include "element.h"
+#include "memory.h"
+#include "domain.h"
+#include "error.h"
+#include "comm.h"
+#include "universe.h"
+
+using namespace CAC_NS;
+
+#define BIGBIGDELTA 16384       // for nmaxintpl increment
+#define BIGDELTA 4096           // for nmaxintg increment
+#define DELTA 1024              // for nmax increment
+
+/*----------------------------------------------------------------------*/
+
+ElementVec::ElementVec(CAC *cac) : Pointers(cac)
+{
+  nmax = nmaxintg = 0;
+  nmaxintpl = 0;
+  size_data_bonus = 0;
+  nargcopy = 0;
+  argcopy = NULL;
+  element_type_setflag = NULL;
+}
+
+/*-----------------------------------------------------------------------*/
+
+ElementVec::~ElementVec()
+{
+  for (int i = 0; i < nargcopy; i++) delete [] argcopy[i];
+  delete [] argcopy;
+  memory->destroy(element_type_setflag);
+}
+
+/* ----------------------------------------------------------------------
+     make copy of args for use by restart & replicate
+    -------------------------------------------------------------------------*/
+
+void ElementVec::store_args(int narg, char **arg)
+{
+  nargcopy = narg;
+  argcopy = new char*[nargcopy];
+  for (int i = 0; i < nargcopy; i++) {
+    int n = strlen(arg[i]) + 1;
+    argcopy[i] = new char[n];
+    strcpy(argcopy[i],arg[i]);
+  }
+}
+
+/* ----------------------------------------------------------------------
+    set max_npe and max_apc
+  ------------------------------------------------------------------------- */
+
+void ElementVec::process_args(int narg, char **arg)
+{
+  if (narg != 2) error->all(FLERR,"Invalid element_style command");
+  element->max_npe = universe->inumeric(FLERR,arg[0]);
+  element->max_apc = universe->inumeric(FLERR,arg[1]);
+  //if (element->max_apc > 1) element->cluster_flag = 1;
+  set_data_size();
+
+}
+
+/* ----------------------------------------------------------------------
+  grow nmax so it is a multiple of DELTA
+ ------------------------------------------------------------------------- */
+
+void ElementVec::grow_nmax()
+{
+  nmax = nmax/DELTA * DELTA;
+  nmax += DELTA;
+  element->nmax = nmax;
+}
+
+/*----------------------------------------------------------------------------*/
+void ElementVec::grow_nmaxintg()
+{
+  nmaxintg = nmaxintg/BIGDELTA *BIGDELTA;
+  nmaxintg += BIGDELTA;
+  element->nmaxintg = nmaxintg;
+}
+
+/*----------------------------------------------------------------------------*/
+
+void ElementVec::grow_nmaxintpl()
+{
+
+  nmaxintpl = nmaxintpl/BIGBIGDELTA *BIGBIGDELTA;
+  nmaxintpl += BIGBIGDELTA;
+  element->nmaxintpl = nmaxintpl;
+}
+
+/* ---------------------------------------------------------------------- */
+
+void ElementVec::init()
+{
+
+  // check if every element has defined interpolate and integration
+
+  for (int i = 0; i < element->nlocal; i++) {
+    if (!element_type_setflag[element->etype[i]]) 
+      error->all(FLERR,"Element type have not been set for all elements");
+  }
+
+}
+
+

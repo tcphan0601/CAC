@@ -1,0 +1,7 @@
+#include "npair_copy.h"
+#include "npair_full_bin_intg.h"
+#include "npair_full_bin_intg_threebody.h"
+#include "npair_full_bin_intpl.h"
+#include "npair_full_bin_sort_intpl.h"
+#include "npair_half_bin_newton_intg.h"
+#include "npair_half_bin_newtoff_intg.h"

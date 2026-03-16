@@ -1,0 +1,8 @@
+#include "pair_lj_cut.h"
+#include "pair_eam.h"
+#include "pair_eam_fs.h"
+#include "pair_eam_alloy.h"
+#include "pair_sw.h"
+#include "pair_table.h"
+#include "pair_hybrid.h"
+#include "pair_hybrid_overlay.h"
