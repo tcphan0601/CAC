@@ -588,3 +588,7 @@ void Pair::ev_unset()
   vflag_fdotr = 0;
 }
 
+NeighList* Pair::get_list()
+{
+  return list;
+}

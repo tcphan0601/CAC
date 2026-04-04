@@ -197,6 +197,7 @@ void ComputeCNAAtom::init_list(int id, NeighList *ptr)
 
 void ComputeCNAAtom::compute_peratom()
 {
+
   int nfcc, nhcp, nbcc4, nbcc6, nico;
   int cj, ck, cl, cm;
   int pattern;
@@ -245,12 +246,17 @@ void ComputeCNAAtom::compute_peratom()
     vector_vatom = vatompattern;
   }
 
-  int nbytes = namax * sizeof(double);
+
+  bigint nbytes = namax * sizeof(double);
   if (nbytes)
     memset(&atompattern[0], 0, nbytes);
+
   nbytes = nemax * element->maxapc * element->maxucell * sizeof(double); 
-  if (nbytes)
+
+  if (nbytes > 0)
     memset(&vatompattern[0][0][0], 0, nbytes);
+  else if (nbytes < 0)
+    error->one(FLERR, "CRITICAL ERROR!!");
 
   // invoke full neighbor list (will copy or build if necessary)
 
@@ -551,6 +557,10 @@ NEXT: continue;
   } else {
     error->all(FLERR,"Conventional cutoff for compute CNA not yet implemented");
   }
+  MPI_Barrier(world);
+  if (comm->me == 0) printf("Test 5\n");
+  MPI_Barrier(world);
+
 }
 
 /*  ----------------------------------------------------------------------

@@ -45,6 +45,7 @@ class PairHybrid : public Pair {
 
   virtual void add_tally_callback(class Compute *);
   virtual void del_tally_callback(class Compute *);
+  virtual NeighList* get_list();
 
  protected:
   int nstyles;                  // # of sub-styles

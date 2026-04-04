@@ -76,7 +76,6 @@ PairHybrid::~PairHybrid()
 void PairHybrid::compute(int eflag, int vflag)
 {
   int i, j, k, n, m, l;
-  int nelocal = element->nlocal;
   int *npe = element->npe;
   int *apc = element->apc;
   int *etype = element->etype;
@@ -126,8 +125,10 @@ void PairHybrid::compute(int eflag, int vflag)
       double *eatom_substyle = styles[m]->eatom;
       for (i = 0; i < n; i++) eatom[i] += eatom_substyle[i];
 
+      n = element->nlocal;
+      if (force->newton_pair) n += element->nghost;
       double ***enode_substyle = styles[m]->enode;
-      for (i = 0; i < nelocal; i++) 
+      for (i = 0; i < n; i++) 
         for (j = 0; j < apc[etype[i]]; j++) 
           for (k = 0; k < npe[etype[i]]; k++) 
             enode[i][j][k] += enode_substyle[i][j][k];
@@ -142,12 +143,14 @@ void PairHybrid::compute(int eflag, int vflag)
         for (j = 0; j < 6; j++)
           vatom[i][j] += vatom_substyle[i][j];
 
+      n = element->nlocal;
+      if (force->newton_pair) n += element->nghost;
       double ****vnode_substyle = styles[m]->vnode;
-      for (i = 0; i < nelocal; i++) 
+      for (i = 0; i < n; i++) 
         for (j = 0; j < apc[etype[i]]; j++) 
           for (k = 0; k < npe[etype[i]]; k++) 
             for (l = 0; l < 6; l++) 
-              vnode[i][j][l][k] += vnode_substyle[i][j][l][k];
+              vnode[i][j][k][l] += vnode_substyle[i][j][k][l];
     }
   }
 
@@ -970,4 +973,9 @@ double PairHybrid::memory_usage()
   bytes += maxvelem * maxnpe * 6 * sizeof(double);
   for (int m = 0; m < nstyles; m++) bytes += styles[m]->memory_usage();
   return bytes;
+}
+
+NeighList* PairHybrid::get_list()
+{
+  return styles[0]->list;
 }

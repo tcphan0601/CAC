@@ -216,6 +216,7 @@ void PairCoulWolf::compute(int eflag, int vflag)
           dely -= shape_array[jetype][jucell][node] * nodex[j][jbasis][node][1];
           delz -= shape_array[jetype][jucell][node] * nodex[j][jbasis][node][2];
         }
+
         if (newton_pair || j < nelocal) {
           jgcell = u2g[jetype][jucell];
           if (jgcell >= 0) {
@@ -224,8 +225,8 @@ void PairCoulWolf::compute(int eflag, int vflag)
             if (jnode >= 0) {
               if (eflag_atom) jeptr = &enode[j][jbasis][jnode];
               if (vflag_atom) jvptr = vnode[j][jbasis][jnode];
-              if (eflag_global) jescale = nodal_weight[jetype]/2.0;
-              if (vflag_global) jvscale = nodal_weight[jetype]/2.0;
+              if (eflag_global) jescale = nodal_weight[jetype] / 2.0;
+              if (vflag_global) jvscale = nodal_weight[jetype] / 2.0;
             }
           }
         }
@@ -252,34 +253,6 @@ void PairCoulWolf::compute(int eflag, int vflag)
           fj[1] -= dely * fpair;
           fj[2] -= delz * fpair;
         }
-        if (DEBUG) {
-/*
-        if (atom->tag[i] == TEST)
-          printf("pair force coul i = %d fpair = %g f = %g %g %g j = %d del = %g %g %g\n",atom->tag[i],fpair,delx*fpair,dely*fpair,delz*fpair,atom->tag[j],delx,dely,delz);
-        if (atom->tag[j] == TEST)
-          printf("pair force coul j = %d fpair = %g f = %g %g %g i = %d del = %g %g %g\n",atom->tag[j],fpair,-delx*fpair,-dely*fpair,-delz*fpair,atom->tag[i],delx,dely,delz);
-*/
-        if (element->tag[i] == TEST && iucell == TESTUCELL && ibasis == TESTBASIS)
-          //printf("pair force buck i = %d %d %d r = %g j = %d %d %d fpair = %g f = %g %g %g jx = %g %g %g \n"
-          //printf("%d %d %d %g %d %d %d %g %-1.16e %-1.16e %-1.16e %g %g %g \n"
-          printf("%-1.16e %-1.16e %-1.16e\n"
-              //,element->tag[i],iucell,ibasis,sqrt(rsq)
-              //,element->tag[j],jucell,jbasis
-              //,fpair
-              ,delx*fpair,dely*fpair,delz*fpair
-              //,xtmp-delx,ytmp-dely,ztmp-delz
-              );
-        if (element->tag[j] == TEST && jucell == TESTUCELL && jbasis == TESTBASIS)
-          //printf("pair force buck i = %d %d %d r = %g j = %d %d %d fpair = %g f = %g %g %g jx = %g %g %g \n"
-          //printf("%d %d %d %g %d %d %d %g %-1.16e %-1.16e %-1.16e %g %g %g \n"
-          printf("%-1.16e %-1.16e %-1.16e\n"
-              //,element->tag[j],jucell,jbasis,sqrt(rsq)
-              //,element->tag[i],iucell,ibasis
-              //,fpair
-              ,-delx*fpair,-dely*fpair,-delz*fpair
-              //,xtmp,ytmp,ztmp
-              );
-      }
         if (eflag) {
           ecoul = v_sh;
           //if (factor_coul < 1.0) ecoul -= (1.0-factor_coul)*prefactor;

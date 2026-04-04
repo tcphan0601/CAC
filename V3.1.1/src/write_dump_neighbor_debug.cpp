@@ -130,7 +130,7 @@ void WriteDumpNeighborDebug::command(int narg, char **arg)
   neighbor->build();
 
   if (force->pair) {
-    list = force->pair->list;
+    list = force->pair->get_list();
   } else error->all(FLERR, "pair has not been defined");
   if (list == nullptr) error->all(FLERR, "neighbor list not build yet");
 
@@ -244,7 +244,6 @@ void WriteDumpNeighborDebug::write(char *file)
     sprintf(str, "Cannot open data file %s", file);
     error->one(FLERR, str);
   }
-
   header();
   int count = 1;
   tagint *atag = atom->tag;
@@ -267,31 +266,33 @@ void WriteDumpNeighborDebug::write(char *file)
   int **g2u = element->g2u;
   int itype, jtype, itag, jtag;
 
-  printf("singleflag = %d igcell = %d ibasis = %d\n",singleflag,igcell,ibasis);
   if (singleflag == 0) {
     for (ii = 0; ii < inum; ii++) {
       i = ilist[ii];
       iindex = iindexlist[ii];
       if (iindex < 0) {
-        itype = 1;
+        itype = atom->type[i];
         coord[0] = ax[i][0];
         coord[1] = ax[i][1];
         coord[2] = ax[i][2];
         igcell = ibasis = -1;
         itag = atag[i];
       } else {
+
         itag = etag[i];
-        itype = 2;
         ietype = etype[i];
         iapc = apc[ietype];
         igcell = iindex / iapc;
         ibasis = iindex % iapc;
         iucell = g2u[ietype][igcell];
+        itype = element->ctype[i][ibasis];
         evec->interpolate(coord, nodex, i, ibasis, iucell, 3);
       }
+
       fprintf(fp, "%d %d %g %g %g %d %d %d %d\n"
           , count++, itype, coord[0], coord[1], coord[2], itag, numneigh[ii], igcell, ibasis);
     }
+
   } else {
     int jnum, *jlist, *jindexlist;
     if (singleflag == 1) {
@@ -321,7 +322,7 @@ void WriteDumpNeighborDebug::write(char *file)
       ibasis = iindex % iapc;
       evec->interpolate(coord, nodex, i, ibasis, iucell, 3);
     }
-    printf("ibasis = %d igcell = %d iucell = %d jnum = %d\n",ibasis,igcell,iucell,jnum);
+    printf("ibasis = %d igcell = %d iucell = %d jnum = %d x = %g %g %g\n",ibasis,igcell,iucell,jnum,coord[0],coord[1],coord[2]);
     fprintf(fp, "%d 1 %g %g %g %d %d %d\n"
         , count++, coord[0], coord[1], coord[2], id, iucell, ibasis);
     for (int jj = 0; jj < jnum; jj++) {

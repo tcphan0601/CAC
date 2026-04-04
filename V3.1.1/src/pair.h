@@ -169,6 +169,7 @@ class Pair : protected Pointers {
  
  public:
 
+  virtual NeighList* get_list();
   int debug_mode;
 };
 

@@ -17,10 +17,10 @@ using namespace MathConst;
 
 //#define TEST 48
 //#define TESTUCELL 2743
-#define TEST 46
-#define TESTUCELL 13
-#define TESTBASIS 1
-#define DEBUG  0
+//#define TEST 46
+//define TESTUCELL 13
+//#define TESTBASIS 1
+//#define DEBUG  0
 /* ---------------------------------------------------------------------- */
 
 PairBuck::PairBuck(CAC *cac) : Pair(cac)
@@ -210,8 +210,8 @@ void PairBuck::compute(int eflag, int vflag)
             if (jnode >= 0) {
               if (eflag_atom) jeptr = &enode[j][jbasis][jnode];
               if (vflag_atom) jvptr = vnode[j][jbasis][jnode];
-              if (eflag_global) jescale = nodal_weight[jetype]/2.0;
-              if (vflag_global) jvscale = nodal_weight[jetype]/2.0;
+              if (eflag_global) jescale = nodal_weight[jetype] / 2.0;
+              if (vflag_global) jvscale = nodal_weight[jetype] / 2.0;
             }
           }
         }
@@ -236,35 +236,6 @@ void PairBuck::compute(int eflag, int vflag)
           fj[1] -= dely * fpair;
           fj[2] -= delz * fpair;
         }
-        if (DEBUG) {
-/*
-        if (atom->tag[i] == TEST)
-          printf("pair force buck i = %d fpair = %g f = %g %g %g j = %d del = %g %g %g\n",atom->tag[i],fpair,delx*fpair,dely*fpair,delz*fpair,atom->tag[j],delx,dely,delz);
-        if (atom->tag[j] == TEST)
-          printf("pair force buck j = %d fpair = %g f = %g %g %g i = %d del = %g %g %g\n",atom->tag[j],fpair,-delx*fpair,-dely*fpair,-delz*fpair,atom->tag[i],delx,dely,delz);
-
-*/
-        if (element->tag[i] == TEST && iucell == TESTUCELL && ibasis == TESTBASIS)
-          //printf("pair force buck i = %d %d %d r = %g j = %d %d %d fpair = %g f = %g %g %g jx = %g %g %g \n"
-          //printf("%d %d %d %g %d %d %d %g %-1.16e %-1.16e %-1.16e %g %g %g \n"
-          printf("%-1.16e %-1.16e %-1.16e\n"
-              //,element->tag[i],iucell,ibasis,sqrt(rsq)
-              //,element->tag[j],jucell,jbasis
-              //,fpair
-              ,delx*fpair,dely*fpair,delz*fpair
-              //,xtmp-delx,ytmp-dely,ztmp-delz
-              );
-        if (element->tag[j] == TEST && jucell == TESTUCELL && jbasis == TESTBASIS)
-          //printf("pair force buck i = %d %d %d r = %g j = %d %d %d fpair = %g f = %g %g %g jx = %g %g %g \n"
-          //printf("%d %d %d %g %d %d %d %g %-1.16e %-1.16e %-1.16e %g %g %g \n"
-          printf("%-1.16e %-1.16e %-1.16e\n"
-              //,element->tag[j],jucell,jbasis,sqrt(rsq)
-              //,element->tag[i],iucell,ibasis
-              //,fpair
-              ,-delx*fpair,-dely*fpair,-delz*fpair
-              //,xtmp,ytmp,ztmp
-              );
-        }
         if (eflag) {
           evdwl = a[ictype][jctype] * rexp - c[ictype][jctype] * r6inv -
             offset[ictype][jctype];
@@ -283,7 +254,7 @@ void PairBuck::compute(int eflag, int vflag)
 
 /* ----------------------------------------------------------------------
    allocate all arrays
-------------------------------------------------------------------------- */
+   ------------------------------------------------------------------------- */
 
 void PairBuck::allocate()
 {
@@ -309,7 +280,7 @@ void PairBuck::allocate()
 
 /* ----------------------------------------------------------------------
    global settings
-------------------------------------------------------------------------- */
+   ------------------------------------------------------------------------- */
 
 void PairBuck::settings(int narg, char **arg)
 {
@@ -329,7 +300,7 @@ void PairBuck::settings(int narg, char **arg)
 
 /* ----------------------------------------------------------------------
    set coeffs for one or more type pairs
-------------------------------------------------------------------------- */
+   ------------------------------------------------------------------------- */
 
 void PairBuck::coeff(int narg, char **arg)
 {
@@ -366,7 +337,7 @@ void PairBuck::coeff(int narg, char **arg)
 
 /* ----------------------------------------------------------------------
    init for one type pair i, j and corresponding j, i
-------------------------------------------------------------------------- */
+   ------------------------------------------------------------------------- */
 
 double PairBuck::init_one(int i, int j)
 {
@@ -421,137 +392,137 @@ double PairBuck::init_one(int i, int j)
 }
 
 /* ----------------------------------------------------------------------
-  proc 0 writes to restart file
-------------------------------------------------------------------------- */
+   proc 0 writes to restart file
+   ------------------------------------------------------------------------- */
 /*
-void PairBuck::write_restart(FILE *fp)
-{
-  write_restart_settings(fp);
+   void PairBuck::write_restart(FILE *fp)
+   {
+   write_restart_settings(fp);
 
-  int i, j;
-  for (i = 1; i <= atom->ntypes; i++)
-    for (j = i; j <= atom->ntypes; j++) {
-      fwrite(&setflag[i][j], sizeof(int), 1, fp);
-      if (setflag[i][j]) {
-        fwrite(&a[i][j], sizeof(double), 1, fp);
-        fwrite(&rho[i][j], sizeof(double), 1, fp);
-        fwrite(&c[i][j], sizeof(double), 1, fp);
-        fwrite(&cut[i][j], sizeof(double), 1, fp);
-      }
-    }
-}
-*/
+   int i, j;
+   for (i = 1; i <= atom->ntypes; i++)
+   for (j = i; j <= atom->ntypes; j++) {
+   fwrite(&setflag[i][j], sizeof(int), 1, fp);
+   if (setflag[i][j]) {
+   fwrite(&a[i][j], sizeof(double), 1, fp);
+   fwrite(&rho[i][j], sizeof(double), 1, fp);
+   fwrite(&c[i][j], sizeof(double), 1, fp);
+   fwrite(&cut[i][j], sizeof(double), 1, fp);
+   }
+   }
+   }
+   */
 /* ----------------------------------------------------------------------
-  proc 0 reads from restart file, bcasts
-------------------------------------------------------------------------- */
+   proc 0 reads from restart file, bcasts
+   ------------------------------------------------------------------------- */
 /*
-void PairBuck::read_restart(FILE *fp)
-{
-  read_restart_settings(fp);
+   void PairBuck::read_restart(FILE *fp)
+   {
+   read_restart_settings(fp);
 
-  allocate();
+   allocate();
 
-  int i, j;
-  int me = comm->me;
-  for (i = 1; i <= atom->ntypes; i++)
-    for (j = i; j <= atom->ntypes; j++) {
-      if (me == 0) utils::sfread(FLERR, &setflag[i][j], sizeof(int), 1, fp, nullptr, error);
-      MPI_Bcast(&setflag[i][j], 1, MPI_INT, 0, world);
-      if (setflag[i][j]) {
-        if (me == 0) {
-          utils::sfread(FLERR, &a[i][j], sizeof(double), 1, fp, nullptr, error);
-          utils::sfread(FLERR, &rho[i][j], sizeof(double), 1, fp, nullptr, error);
-          utils::sfread(FLERR, &c[i][j], sizeof(double), 1, fp, nullptr, error);
-          utils::sfread(FLERR, &cut[i][j], sizeof(double), 1, fp, nullptr, error);
-        }
-        MPI_Bcast(&a[i][j], 1, MPI_DOUBLE, 0, world);
-        MPI_Bcast(&rho[i][j], 1, MPI_DOUBLE, 0, world);
-        MPI_Bcast(&c[i][j], 1, MPI_DOUBLE, 0, world);
-        MPI_Bcast(&cut[i][j], 1, MPI_DOUBLE, 0, world);
-      }
-    }
-}
-*/
+   int i, j;
+   int me = comm->me;
+   for (i = 1; i <= atom->ntypes; i++)
+   for (j = i; j <= atom->ntypes; j++) {
+   if (me == 0) utils::sfread(FLERR, &setflag[i][j], sizeof(int), 1, fp, nullptr, error);
+   MPI_Bcast(&setflag[i][j], 1, MPI_INT, 0, world);
+   if (setflag[i][j]) {
+   if (me == 0) {
+   utils::sfread(FLERR, &a[i][j], sizeof(double), 1, fp, nullptr, error);
+   utils::sfread(FLERR, &rho[i][j], sizeof(double), 1, fp, nullptr, error);
+   utils::sfread(FLERR, &c[i][j], sizeof(double), 1, fp, nullptr, error);
+   utils::sfread(FLERR, &cut[i][j], sizeof(double), 1, fp, nullptr, error);
+   }
+   MPI_Bcast(&a[i][j], 1, MPI_DOUBLE, 0, world);
+   MPI_Bcast(&rho[i][j], 1, MPI_DOUBLE, 0, world);
+   MPI_Bcast(&c[i][j], 1, MPI_DOUBLE, 0, world);
+   MPI_Bcast(&cut[i][j], 1, MPI_DOUBLE, 0, world);
+   }
+   }
+   }
+   */
 /* ----------------------------------------------------------------------
-  proc 0 writes to restart file
-------------------------------------------------------------------------- */
+   proc 0 writes to restart file
+   ------------------------------------------------------------------------- */
 /*
-void PairBuck::write_restart_settings(FILE *fp)
-{
-  fwrite(&cut_global, sizeof(double), 1, fp);
-  fwrite(&offset_flag, sizeof(int), 1, fp);
-  fwrite(&mix_flag, sizeof(int), 1, fp);
-  fwrite(&tail_flag, sizeof(int), 1, fp);
-}
-*/
+   void PairBuck::write_restart_settings(FILE *fp)
+   {
+   fwrite(&cut_global, sizeof(double), 1, fp);
+   fwrite(&offset_flag, sizeof(int), 1, fp);
+   fwrite(&mix_flag, sizeof(int), 1, fp);
+   fwrite(&tail_flag, sizeof(int), 1, fp);
+   }
+   */
 /* ----------------------------------------------------------------------
-  proc 0 reads from restart file, bcasts
-------------------------------------------------------------------------- */
+   proc 0 reads from restart file, bcasts
+   ------------------------------------------------------------------------- */
 /*
-void PairBuck::read_restart_settings(FILE *fp)
-{
-  if (comm->me == 0) {
-    utils::sfread(FLERR, &cut_global, sizeof(double), 1, fp, nullptr, error);
-    utils::sfread(FLERR, &offset_flag, sizeof(int), 1, fp, nullptr, error);
-    utils::sfread(FLERR, &mix_flag, sizeof(int), 1, fp, nullptr, error);
-    utils::sfread(FLERR, &tail_flag, sizeof(int), 1, fp, nullptr, error);
-  }
-  MPI_Bcast(&cut_global, 1, MPI_DOUBLE, 0, world);
-  MPI_Bcast(&offset_flag, 1, MPI_INT, 0, world);
-  MPI_Bcast(&mix_flag, 1, MPI_INT, 0, world);
-  MPI_Bcast(&tail_flag, 1, MPI_INT, 0, world);
-}
-*/
+   void PairBuck::read_restart_settings(FILE *fp)
+   {
+   if (comm->me == 0) {
+   utils::sfread(FLERR, &cut_global, sizeof(double), 1, fp, nullptr, error);
+   utils::sfread(FLERR, &offset_flag, sizeof(int), 1, fp, nullptr, error);
+   utils::sfread(FLERR, &mix_flag, sizeof(int), 1, fp, nullptr, error);
+   utils::sfread(FLERR, &tail_flag, sizeof(int), 1, fp, nullptr, error);
+   }
+   MPI_Bcast(&cut_global, 1, MPI_DOUBLE, 0, world);
+   MPI_Bcast(&offset_flag, 1, MPI_INT, 0, world);
+   MPI_Bcast(&mix_flag, 1, MPI_INT, 0, world);
+   MPI_Bcast(&tail_flag, 1, MPI_INT, 0, world);
+   }
+   */
 /* ----------------------------------------------------------------------
    proc 0 writes to data file
-------------------------------------------------------------------------- */
+   ------------------------------------------------------------------------- */
 /*
-void PairBuck::write_data(FILE *fp)
-{
-  for (int i = 1; i <= atom->ntypes; i++)
-    fprintf(fp, "%d %g %g %g\n", i, a[i][i], rho[i][i], c[i][i]);
-}
-*/
+   void PairBuck::write_data(FILE *fp)
+   {
+   for (int i = 1; i <= atom->ntypes; i++)
+   fprintf(fp, "%d %g %g %g\n", i, a[i][i], rho[i][i], c[i][i]);
+   }
+   */
 /* ----------------------------------------------------------------------
    proc 0 writes all pairs to data file
-------------------------------------------------------------------------- */
+   ------------------------------------------------------------------------- */
 /*
-void PairBuck::write_data_all(FILE *fp)
-{
-  for (int i = 1; i <= atom->ntypes; i++)
-    for (int j = i; j <= atom->ntypes; j++)
-      fprintf(fp, "%d %d %g %g %g %g\n", i, j, 
-              a[i][j], rho[i][j], c[i][j], cut[i][j]);
-}
-*/
+   void PairBuck::write_data_all(FILE *fp)
+   {
+   for (int i = 1; i <= atom->ntypes; i++)
+   for (int j = i; j <= atom->ntypes; j++)
+   fprintf(fp, "%d %d %g %g %g %g\n", i, j, 
+   a[i][j], rho[i][j], c[i][j], cut[i][j]);
+   }
+   */
 /* ---------------------------------------------------------------------- */
 
 //double PairBuck::single(int /*i*/, int /*j*/, int ictype, int jctype, 
 //                        double rsq, double /*factor_coul*/, double factor_lj, 
 //                        double &fforce)
 /*
-{
-  double r2inv, r6inv, r, rexp, forcebuck, phibuck;
+   {
+   double r2inv, r6inv, r, rexp, forcebuck, phibuck;
 
-  r2inv = 1.0/rsq;
-  r6inv = r2inv*r2inv*r2inv;
-  r = sqrt(rsq);
-  rexp = exp(-r*rhoinv[ictype][jctype]);
-  forcebuck = buck1[ictype][jctype]*r*rexp - buck2[ictype][jctype]*r6inv;
-  fforce = factor_lj*forcebuck*r2inv;
+   r2inv = 1.0/rsq;
+   r6inv = r2inv*r2inv*r2inv;
+   r = sqrt(rsq);
+   rexp = exp(-r*rhoinv[ictype][jctype]);
+   forcebuck = buck1[ictype][jctype]*r*rexp - buck2[ictype][jctype]*r6inv;
+   fforce = factor_lj*forcebuck*r2inv;
 
-  phibuck = a[ictype][jctype]*rexp - c[ictype][jctype]*r6inv -
-    offset[ictype][jctype];
-  return factor_lj*phibuck;
-}
-*/
+   phibuck = a[ictype][jctype]*rexp - c[ictype][jctype]*r6inv -
+   offset[ictype][jctype];
+   return factor_lj*phibuck;
+   }
+   */
 /* ---------------------------------------------------------------------- */
 /*
-void *PairBuck::extract(const char *str, int &dim)
-{
-  dim = 2;
-  if (strcmp(str, "a") == 0) return (void *) a;
-  if (strcmp(str, "c") == 0) return (void *) c;
-  return nullptr;
-}
-*/
+   void *PairBuck::extract(const char *str, int &dim)
+   {
+   dim = 2;
+   if (strcmp(str, "a") == 0) return (void *) a;
+   if (strcmp(str, "c") == 0) return (void *) c;
+   return nullptr;
+   }
+   */
