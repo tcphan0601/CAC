@@ -188,7 +188,6 @@ void DumpAtom::init_style()
 
   atom_size_one = 5 + (15 * stress_flag - 3 * stress_flag * stress_flag)/2 + 3 * (velocity_flag + force_flag) + 
     4 * displace_flag + pe_flag + 7 * element_flag + 3 * neighbor_flag;
-  printf("atom_size_one = %d\n",atom_size_one);
   if (image_flag) atom_size_one += 3;
   elem_size_one = node_size_one = 0;
   max_size_one = atom_size_one;
