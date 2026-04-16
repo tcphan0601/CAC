@@ -23,7 +23,7 @@ using namespace CAC_NS;
 #define MAXNEAR 14
 #define MAXCOMMON 6
 
-enum{UNKNOWN, OTHER, FCC, HCP, BCC, ICOS};
+enum{UNKNOWN, FCC, HCP, BCC, ICOS, OTHER};
 enum{NCOMMON, NBOND, MAXBOND, MINBOND};
 
 /*  ----------------------------------------------------------------------  */
