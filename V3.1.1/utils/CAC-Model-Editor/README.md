@@ -1,4 +1,4 @@
-# CAC Model Editor  v1.0 by Chunxu Yan
+# CAC Model Editor  v1.0 by Chunxu Yan (ychunxu@ncsu.edu)
 
 A desktop GUI for editing, running, and visualizing CAC simulations — replacing the write-script → terminal → TecPlot cycle with a single integrated tool.
 

@@ -5,7 +5,11 @@
 <p align="right">CAC V2: Thanh Phan: tcphan@iastate.edu,tphan4@ncsu.edu
 Rigelesaiyin Ji:rji@iastate.edu
 Yipeng Peng: ypeng@iastate.edu</p>
-<p align="right">Aug 12, 2025</p>
+<p align="right">CAC V3: Thanh Phan: tphan4@ncsu.edu
+Chunxu Yan: ychunxu@ncsu.edu
+</p>
+
+<p align="right">Apr 17, 2026</p>
 
 ## Table of Contents
 
@@ -102,7 +106,7 @@ CAC software package is build based on LAMMPS and hence the structure is similar
    details). If something is similar to LAMMPS, see LAMMPS docmentation for
    syntax.
 
-Current stable version: 3.0.1 12Nov2024
+Current stable version: 3.1.1 17Apr2026
 
 ## Important Notes
 
@@ -124,6 +128,10 @@ Current stable version: 3.0.1 12Nov2024
 -   List of Optional Packages:
     - TECPLOT
     - DEEPMD
+
+## Utilities
+
+-   Utilities code are provided in utils folder. Check README.md file in each folder for details.
 
 ## Commands in stable version
 
