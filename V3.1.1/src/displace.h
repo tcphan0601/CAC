@@ -36,6 +36,7 @@ class Displace : protected Pointers {
   void rotate(char **);
   void mirror(char **);
   void multi_dislocations(char **);
+  void dislloop(char **);
   void disp_file(char **);
 
   void dislocations(char **);
@@ -61,6 +62,9 @@ class Displace : protected Pointers {
   void screw_dislocation_field(double &, double, double, double, double);
   void ramp_coord(double, double, double, double, double *, int, int);
   void polar_ramp_coord(double, double, double, double, double *, int, int, double *, double *);
+  double solid_angle(double *, double *, double *);
+  void segment_displacement(double *, double *, double *, double, double *);
+
 };
 
 }

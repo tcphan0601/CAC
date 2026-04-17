@@ -28,7 +28,7 @@ using namespace MathExtra;
 #define   MAXLINE 256
 #define   CHUNK 1024
 
-enum{MOVE, POLARRAMP, RAMP, RANDOM, ROTATE, MIRROR, DISLOCATIONS, MULTIDISL, DISPFILE};
+enum{MOVE, POLARRAMP, RAMP, RANDOM, ROTATE, MIRROR, DISLOCATIONS, MULTIDISL, DISPFILE, DISLLOOP};
 
 /*  ----------------------------------------------------------------------  */
 
@@ -73,12 +73,13 @@ void Displace::command(int narg, char **arg)
   else if (strcmp(arg[1], "dislocations") == 0) style = DISLOCATIONS;
   else if (strcmp(arg[1], "multidisl") == 0) style = MULTIDISL;
   else if (strcmp(arg[1], "disp/file") == 0) style = DISPFILE;
+  else if (strcmp(arg[1], "disl/loop") == 0) style = DISLLOOP;
   else error->all(FLERR, "Illegal displace command");
 
   // group and style
-  // ignore if dislocation/multidisl style
+  // ignore if dislocation/multidisl/dislloop style
   
-  if (style != DISLOCATIONS && style != MULTIDISL) {
+  if (style != DISLOCATIONS && style != MULTIDISL && style != DISLLOOP) {
     igroup = group->find(arg[0]);
     if (igroup == -1) error->all(FLERR, "Could not find displace group ID");
     groupbit = group->bitmask[igroup];
@@ -106,6 +107,7 @@ void Displace::command(int narg, char **arg)
     options(narg-iarg, &arg[iarg]);
   }
   else if (style == MULTIDISL) options(narg-13, &arg[13]);
+  else if (style == DISLLOOP) options(narg-14, &arg[14]);
   else if (style == DISPFILE) options(narg-3, &arg[3]);
 
   // setup scaling
@@ -147,6 +149,10 @@ void Displace::command(int narg, char **arg)
   // create multiple dislocation with certain spacing
 
   else if (style == MULTIDISL) multi_dislocations(&arg[2]); 
+
+  // displace atoms/elements according to theoretical displacement field of dislocation loop
+  
+  else if (style == DISLLOOP) dislloop(&arg[2]);
 
   // displace atoms/elements according to displacement values from an external file
 
@@ -1196,5 +1202,221 @@ void Displace::disp_file(char **arg)
   delete [] values;
   if (comm->me == 0) fclose(fp);
 }
+
+/* ----------------------------------------------------------------------
+   Move atoms/elements according to a dislocation loop (Finite Segment Method)
+   Syntax: displace group dislloop shape cx cy cz nx ny nz R bx by bz nu
+------------------------------------------------------------------------- */
+
+void Displace::dislloop(char **arg)
+{
+  char *shape = arg[0];
+
+  double center[3], n[3], b[3];
+  
+  center[0] = universe->numeric(FLERR, arg[1]);
+  center[1] = universe->numeric(FLERR, arg[2]);
+  center[2] = universe->numeric(FLERR, arg[3]);
+  
+  n[0] = universe->numeric(FLERR, arg[4]);
+  n[1] = universe->numeric(FLERR, arg[5]);
+  n[2] = universe->numeric(FLERR, arg[6]);
+  norm3(n); 
+  
+  double R = universe->numeric(FLERR, arg[7]);
+  
+  b[0] = universe->numeric(FLERR, arg[8]);
+  b[1] = universe->numeric(FLERR, arg[9]);
+  b[2] = universe->numeric(FLERR, arg[10]);
+  
+  double nu = universe->numeric(FLERR, arg[11]);
+
+  if (nu >= 0.5 || nu < -1.0)
+    error->all(FLERR, "Illegal displace disl/loop command: Invalid Poisson's ratio");
+
+  int npoints;
+  double **xLoop;
+
+  // Create two orthogonal vectors (u_vec, v_vec) lying in the loop plane
+  double u_vec[3], v_vec[3];
+  if (abs(n[0]) > 0.9) {
+    u_vec[0] = 0.0; u_vec[1] = 1.0; u_vec[2] = 0.0;
+  } else {
+    u_vec[0] = 1.0; u_vec[1] = 0.0; u_vec[2] = 0.0;
+  }
+  cross3(n, u_vec, v_vec);
+  norm3(v_vec);
+  cross3(v_vec, n, u_vec);
+  norm3(u_vec);
+
+  if (strcmp(shape, "circle") == 0) {
+    Npoints = 60;
+    memory->create(xLoop, npoints, 3, "displace:xLoop");
+    for (int i = 0; i < Npoints; i++) {
+      double theta = 2.0 * MY_PI * (double)i / (double)Npoints;
+      xLoop[i][0] = center[0] + R * cos(theta) * u_vec[0] + R * sin(theta) * v_vec[0];
+      xLoop[i][1] = center[1] + R * cos(theta) * u_vec[1] + R * sin(theta) * v_vec[1];
+      xLoop[i][2] = center[2] + R * cos(theta) * u_vec[2] + R * sin(theta) * v_vec[2];
+    }
+  } else if (strcmp(shape, "square") == 0) {
+    Npoints = 4;
+    memory->create(xLoop, npoints, 3, "displace:xLoop");
+    double corners[4][2] = {{R, R}, {-R, R}, {-R, -R}, {R, -R}};
+    for (int i = 0; i < Npoints; i++) {
+      xLoop[i][0] = center[0] + corners[i][0] * u_vec[0] + corners[i][1] * v_vec[0];
+      xLoop[i][1] = center[1] + corners[i][0] * u_vec[1] + corners[i][1] * v_vec[1];
+      xLoop[i][2] = center[2] + corners[i][0] * u_vec[2] + corners[i][1] * v_vec[2];
+    }
+  } else {
+    error->all(FLERR, "Illegal shape for displace disloop command. Use 'circle' or 'square'.");
+  }
+
+  double **ax = atom->x;
+  int nalocal = atom->nlocal;
+  double ****nodex = element->nodex;
+  int *etype = element->etype;
+  int nelocal = element->nlocal;
+  int *npe = element->npe;
+  int *apc = element->apc;
+
+  if (nalocal) {
+    for (int i = 0; i < nalocal; i++) {
+      double R_obs[3]; 
+      R_obs[0] = ax[i][0]; R_obs[1] = ax[i][1]; R_obs[2] = ax[i][2];
+
+      double xC[3];
+      sub3(center, R_obs, xC); 
+
+      double omega = 0.0;
+      double u_tot[3] = {0.0, 0.0, 0.0};
+
+      for (int s = 0; s < npoints; s++) {
+        int prev = (s == 0) ? npoints - 1 : s - 1;
+        double xA[3], xB[3];
+
+        sub3(xLoop[prev], R_obs, xA);
+        sub3(xLoop[s], R_obs, xB);
+
+        omega += solid_angle(xA, xB, xC);
+
+        double u_seg[3];
+        segment_displacement(xA, xB, b, nu, u_seg);
+        add3(u_tot, u_seg, u_tot);
+      }
+
+      ax[i][0] += u_tot[0] + b[0] * omega;
+      ax[i][1] += u_tot[1] + b[1] * omega;
+      ax[i][2] += u_tot[2] + b[2] * omega;
+    }
+  }
+
+  if (nelocal) {
+    for (int i = 0; i < nelocal; i++) {
+      for (int j = 0; j < apc[etype[i]]; j++) {
+        for (int k = 0; k < npe[etype[i]]; k++) {
+          double R_obs[3];
+          R_obs[0] = nodex[i][j][k][0]; 
+          R_obs[1] = nodex[i][j][k][1]; 
+          R_obs[2] = nodex[i][j][k][2];
+
+          double xC[3];
+          sub3(center, R_obs, xC);
+
+          double omega = 0.0;
+          double u_tot[3] = {0.0, 0.0, 0.0};
+
+          for (int s = 0; s < npoints; s++) {
+            int prev = (s == 0) ? npoints - 1 : s - 1;
+            double xA[3], xB[3];
+
+            sub3(xLoop[prev], R_obs, xA);
+            sub3(xLoop[s], R_obs, xB);
+
+            omega += solid_angle(xA, xB, xC);
+
+            double u_seg[3];
+            segment_displacement(xA, xB, b, nu, u_seg);
+            add3(u_tot, u_seg, u_tot);
+          }
+
+          nodex[i][j][k][0] += u_tot[0] + b[0] * omega;
+          nodex[i][j][k][1] += u_tot[1] + b[1] * omega;
+          nodex[i][j][k][2] += u_tot[2] + b[2] * omega;
+        }
+      }
+    }
+    element->evec->update_center_coord();
+  }
+  memory->destroy(xLoop);
+}
+
+/* ---------------------------------------------------------------------- */
+
+double Displace::solid_angle(double *xA, double *xB, double *xC)
+{
+  double rA = len3(xA);
+  double rB = len3(xB);
+  double rC = len3(xC);
+
+  double xA_cross_xB[3];
+  cross3(xA, xB, xA_cross_xB);
+
+  double numerator = dot3(xA_cross_xB, xC);
+  double denominator = rA * rB * rC + dot3(xA, xB) * rC + dot3(xB, xC) * rA + dot3(xC, xA) * rB;
+
+  return atan2(numerator, denominator) / (2.0 * MY_PI);
+}
+
+/* ---------------------------------------------------------------------- */
+
+void Displace::segment_displacement(double *xA, double *xB, double *b, double nu, double *u)
+{
+  double rA = len3(xA);
+  double rB = len3(xB);
+
+  double tAB[3];
+  sub3(xB, xA, tAB);
+  double len_tAB = len3(tAB);
+  if (len_tAB > EPSILON2) {
+    tAB[0] /= len_tAB; tAB[1] /= len_tAB; tAB[2] /= len_tAB;
+  }
+
+  double nAB[3];
+  cross3(xA, xB, nAB);
+  double len_nAB = len3(nAB);
+  if (len_nAB > EPSILON2) {
+    nAB[0] /= len_nAB; nAB[1] /= len_nAB; nAB[2] /= len_nAB;
+  } else {
+    error->one(FLERR, "Atoms coordinate are too close to the dislocation loop plane");
+  }
+
+  double b_cross_tAB[3];
+  cross3(b, tAB, b_cross_tAB);
+  double b_dot_nAB = dot3(b, nAB);
+
+  double diff[3];
+  double rA_safe = (rA > EPSILON2) ? rA : EPSILON2;
+  double rB_safe = (rB > EPSILON2) ? rB : EPSILON2;
+
+  diff[0] = xB[0]/rB_safe - xA[0]/rA_safe;
+  diff[1] = xB[1]/rB_safe - xA[1]/rA_safe;
+  diff[2] = xB[2]/rB_safe - xA[2]/rA_safe;
+
+  double diff_cross_nAB[3];
+  cross3(diff, nAB, diff_cross_nAB);
+
+  double term_top = rB + dot3(xB, tAB);
+  double term_bot = rA + dot3(xA, tAB);
+  if (term_top < EPSILON2) term_top = EPSILON2;
+  if (term_bot < EPSILON2) term_bot = EPSILON2;
+
+  double log_term = log(term_top / term_bot);
+  double factor = 1.0 / (8.0 * MY_PI * (1.0 - nu));
+
+  u[0] = ( -(1.0 - 2.0*nu) * b_cross_tAB[0] * log_term + b_dot_nAB * diff_cross_nAB[0] ) * factor;
+  u[1] = ( -(1.0 - 2.0*nu) * b_cross_tAB[1] * log_term + b_dot_nAB * diff_cross_nAB[1] ) * factor;
+  u[2] = ( -(1.0 - 2.0*nu) * b_cross_tAB[2] * log_term + b_dot_nAB * diff_cross_nAB[2] ) * factor;
+}
+
 
 
