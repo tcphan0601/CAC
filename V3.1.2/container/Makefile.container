@@ -1,0 +1,49 @@
+SHELL = /bin/sh
+
+# Compiler/linker settings for inside the container
+CC =           mpicxx
+CXX =          mpicxx
+CCFLAGS =      -g -O3 -DDEEPMD_ENABLE -DTECPLOT_ENABLE
+SHFLAGS =      -fPIC
+LINK =         mpicxx
+LINKFLAGS =    -g -O
+SIZE =         size
+
+# --- Package Settings ---
+
+# Get TensorFlow paths from the Python environment inside the container
+TF_CFLAGS := $(shell python -c 'import tensorflow as tf; print(" ".join(tf.sysconfig.get_compile_flags()))')
+TF_LFLAGS := $(shell python -c 'import tensorflow as tf; print(" ".join(tf.sysconfig.get_link_flags()))')
+
+# Path where DeepMD-kit was installed inside the container
+DEEPMD_INSTALL_PATH = /usr/local
+
+# Combine all library flags
+DEEPMD_PATH = -L$(DEEPMD_INSTALL_PATH)/lib
+DEEPMD_LIB = -Wl,-rpath,$(DEEPMD_INSTALL_PATH)/lib -ldeepmd_cc
+DEEPMD_INC = -I$(DEEPMD_INSTALL_PATH)/include
+
+TECIOLIB = -LTECPLOT/lib -ltecio
+TECPLOT_INC = -ITECPLOT/include
+
+# All libraries to be linked
+LIB = $(TF_LFLAGS) $(DEEPMD_LIB) $(TECIOLIB) -ldl -lm
+
+# Build Targets
+EXE =          ./cac.3.1.2
+SRC =          $(wildcard *.cpp)
+OBJ =          $(SRC:%.cpp=obj/%.o)
+
+all: $(EXE)
+
+# Link target
+$(EXE):	$(OBJ)
+	$(LINK) $(LINKFLAGS) $(OBJ) $(DEEPMD_PATH) $(LIB) -o $(EXE)
+	$(SIZE) $(EXE)
+
+# Compilation rules
+obj/%.o:%.cpp
+	$(CC) $(CCFLAGS) $(DEEPMD_INC) $(TECPLOT_INC) $(TF_CFLAGS) $(SHFLAGS) -c $< -o $@
+
+clean:
+	rm -rf obj ./cac.3.1.2
