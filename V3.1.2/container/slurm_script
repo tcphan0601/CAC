@@ -30,7 +30,7 @@ SINGULARITY_ENV_OPTS="--env OMP_NUM_THREADS=1 \
 INPUT_FILE=in.script
 
 # Change the path to your container image here
-CONTAINER_IMAGE=/home/tcphan/cac-deepmd-3.1.0.sif
+CONTAINER_IMAGE=/home/tcphan/cac.sif
 
 mpirun -n ${SLURM_NTASKS} singularity run \
             ${SINGULARITY_BIND_OPTS} ${SINGULARITY_ENV_OPTS} \
