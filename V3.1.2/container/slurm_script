@@ -14,7 +14,7 @@
 
 # load the singularity module if needed
 module purge
-module load slurm singularitypro 
+module load slurm singularitypro cpu/0.17.3b  gcc/10.2.0/npcyll4 openmpi/4.1.1/ygduf2r
 
 
 # Bind the work and scratch folders for the specific HPC
