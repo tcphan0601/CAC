@@ -18,7 +18,7 @@ module load slurm singularitypro
 
 
 # Bind the work and scratch folders for the specific HPC
-SINGULARITY_BIND_OPTS="--bind /expanse,/scratch"
+SINGULARITY_BIND_OPTS="--bind /expanse,/scratch,/home"
 
 # This is only needed if using DeepMD
 # Use the --env flag to pass environment variables directly into the container at runtime.

@@ -9,9 +9,9 @@ sudo singularity build cac.sif ./container/cac.def
 ```
 
 ## 2. Local Usage
-
+Use --bind option to give singularity access to folders containing necessary data for your simulations
 ```bash
-singularity run cac.sif -in input.in
+mpirun -n 8 singularity run --bind /data1 cac.sif -in input.in
 ```
 
 ## 3. HPC Usage (SLURM)
