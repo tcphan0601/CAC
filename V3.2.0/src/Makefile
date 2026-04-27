@@ -88,6 +88,7 @@ yes-deepmd:
 	@ln -sf DEEPMD/pair_base.h .
 	@ln -sf DEEPMD/pair_deepmd.cpp .
 	@ln -sf DEEPMD/pair_deepmd.h .
+	@ln -sf DEEPMD/deepmd_version.h .
 	@grep -q -F '#include "pair_deepmd.h"' style_pair.h || echo '#include "pair_deepmd.h"' >> style_pair.h
 	@grep -q -F '#include "pair_base.h"' style_pair.h || echo '#include "pair_base.h"' >> style_pair.h
 	@touch .deepmd_enabled
@@ -96,7 +97,7 @@ yes-deepmd:
 # Uninstalls the DEEPMD package
 no-deepmd:
 	@echo "--- Uninstalling package DEEPMD ---"
-	@rm -f pair_base.cpp pair_base.h pair_deepmd.cpp pair_deepmd.h
+	@rm -f pair_base.cpp pair_base.h pair_deepmd.cpp pair_deepmd.h deepmd_version.h
 	@sed -i '/#include "pair_deepmd.h"/d' style_pair.h
 	@sed -i '/#include "pair_base.h"/d' style_pair.h
 	@rm -f .deepmd_enabled

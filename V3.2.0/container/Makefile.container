@@ -38,7 +38,7 @@ all: $(EXE)
 
 # Link target
 $(EXE):	$(OBJ)
-	$(LINK) $(LINKFLAGS) $(OBJ) $(DEEPMD_PATH) $(LIB) -o $(EXE)
+	$(LINK) $(LINKFLAGS) $(OBJ) -o $(EXE) $(DEEPMD_PATH) $(LIB)
 	$(SIZE) $(EXE)
 
 # Compilation rules

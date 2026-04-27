@@ -15,6 +15,9 @@ Chunxu Yan: ychunxu@ncsu.edu
 
 -   [Introduction](#introduction)
 -   [Important Notes](#important-notes)
+-   [Installation](#installation)
+-   [Optional Packages](#optional-packages)
+-   [Utilities](#utilities)
 -   [Commands in Stable Version](#commands-in-stable-version)
     -   [add_atoms](#add_atoms)
     -   [add_etype](#add_etype)
@@ -128,12 +131,12 @@ Current stable version: 3.2.0 25Apr2026
 -   To uninstall optional packages, run:
     make no-package-name
 -   List of Optional Packages:
-    - TECPLOT
-    - DEEPMD
+    - TECPLOT: use tecio library to write out binary format for Tecplot
+    - DEEPMD: include pair deepmd potential
 
 ## Utilities
 
--   Utilities code are provided in utils folder. Check README.md file in each folder for details.
+-   Utility codes are provided in utils folder. Check README.md file in each folder for details.
 
 ## Commands in stable version
 
