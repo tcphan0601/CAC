@@ -1,0 +1,1422 @@
+#include <mpi.h>
+#include <stdlib.h>
+#include <string.h>
+#include "displace.h"
+#include "atom.h"
+#include "element.h"
+#include "element_vec.h"
+#include "irregular_comm.h"
+#include "modify.h"
+#include "domain.h"
+#include "lattice.h"
+#include "comm.h"
+#include "group.h"
+#include "math_const.h"
+#include "universe.h"
+#include "input.h"
+#include "math_extra.h"
+#include "memory.h"
+#include "error.h"
+#include "variable.h"
+
+using namespace CAC_NS;
+using namespace MathConst;
+using namespace MathExtra;
+
+#define   EPSILON 1.0e-4
+#define   EPSILON2 1.0e-10
+#define   MAXLINE 256
+#define   CHUNK 1024
+
+enum{MOVE, POLARRAMP, RAMP, RANDOM, ROTATE, MIRROR, DISLOCATIONS, MULTIDISL, DISPFILE, DISLLOOP};
+
+/*  ----------------------------------------------------------------------  */
+
+Displace::Displace(CAC *cac) : Pointers(cac)
+{
+  mvec = nullptr;
+}
+
+/*  ----------------------------------------------------------------------  */
+
+Displace::~Displace()
+{
+  memory->destroy(mvec);
+}
+
+/*  ----------------------------------------------------------------------  */
+
+void Displace::command(int narg, char **arg)
+{
+  if (domain->box_exist == 0)
+    error->all(FLERR, "Displace command before simulation box is defined");
+  if (narg < 3) error->all(FLERR, "Illegal displace command");
+  /*  no read/write restart yet
+     if (modify->nfix_restart_peratom)
+     error->all(FLERR, "Cannot displace after "
+     "reading restart file with per-atom info");
+      */
+  if (comm->me == 0 && screen) fprintf(screen, "Displacing atoms/elements ...\n");
+  if (comm->me == 0 && logfile) fprintf(logfile, "Displacing atoms/elements ...\n");
+
+  /*  no fix rigid yet
+     if (modify->check_rigid_group_overlap(groupbit))
+     error->warning(FLERR, "Attempting to displace atoms in rigid bodies");
+      */
+  style = -1;
+  if (strcmp(arg[1], "move") == 0) style = MOVE;
+  else if (strcmp(arg[1], "ramp") == 0) style = RAMP;
+  else if (strcmp(arg[1], "polar/ramp") == 0) style = POLARRAMP;
+  //  else if (strcmp(arg[1], "random") == 0) style = RANDOM;
+  else if (strcmp(arg[1], "rotate") == 0) style = ROTATE;
+  else if (strcmp(arg[1], "mirror") == 0) style = MIRROR;
+  else if (strcmp(arg[1], "dislocations") == 0) style = DISLOCATIONS;
+  else if (strcmp(arg[1], "multidisl") == 0) style = MULTIDISL;
+  else if (strcmp(arg[1], "disp/file") == 0) style = DISPFILE;
+  else if (strcmp(arg[1], "disl/loop") == 0) style = DISLLOOP;
+  else error->all(FLERR, "Illegal displace command");
+
+  // group and style
+  // ignore if dislocation/multidisl/dislloop style
+  
+  if (style != DISLOCATIONS && style != MULTIDISL && style != DISLLOOP) {
+    igroup = group->find(arg[0]);
+    if (igroup == -1) error->all(FLERR, "Could not find displace group ID");
+    groupbit = group->bitmask[igroup];
+  }
+
+  // set option defaults
+
+  scaleflag = 0;
+  group_flag = Group::ELEMENT;
+  sequence_flag = 0;
+  index_offset = 0;
+  tag_match_flag = 1;
+  reverse_flag = 1;
+
+  // read options from end of input line
+
+  if (style == MOVE) options(narg-5, &arg[5]);
+  else if (style == RAMP) options(narg-8, &arg[8]);
+  else if (style == POLARRAMP) options(narg-14, &arg[14]);
+  //  else if (style == RANDOM) options(narg-6, &arg[6]);
+  else if (style == ROTATE) options(narg-9, &arg[9]);
+  else if (style == MIRROR) options(narg-4, &arg[4]);
+  else if (style == DISLOCATIONS) {
+    int iarg = universe->inumeric(FLERR, arg[2]) * 8 + 3;
+    options(narg-iarg, &arg[iarg]);
+  }
+  else if (style == MULTIDISL) options(narg-13, &arg[13]);
+  else if (style == DISLLOOP) options(narg-14, &arg[14]);
+  else if (style == DISPFILE) options(narg-3, &arg[3]);
+
+  // setup scaling
+
+  if (scaleflag) {
+    xscale[0] = domain->lattice->xlattice;
+    xscale[1] = domain->lattice->ylattice;
+    xscale[2] = domain->lattice->zlattice;
+  }
+  else xscale[0] = xscale[1] = xscale[2] = 1.0;
+
+  // move atoms/elements by 3-vector or specified variable(s)
+
+  if (style == MOVE) 
+    for (int idim = 0; idim < 3; idim++) move(idim, arg[idim+2]);
+
+  // move atoms/elements in ramped fashion
+
+  else if (style == RAMP) ramp(&arg[2]);
+
+  // move atoms/elements in ramped fashion in polar coordinates
+
+  else if (style == POLARRAMP) polar_ramp(&arg[2]);
+
+  // rotate atoms/elements by right-hand rule by theta around R
+
+  else if (style == ROTATE) rotate(&arg[2]);
+
+  // reflect atoms/elements accross a mirror
+  
+  else if (style == MIRROR) mirror(&arg[2]);
+
+  // displace atoms/elements according to theoretical displacement field of dislocation
+  // create 1 or multiple dislocations, each specified one by one
+
+  else if (style == DISLOCATIONS) dislocations(&arg[2]); 
+
+  // displace atoms/elements according to theoretical displacement field of dislocation
+  // create multiple dislocation with certain spacing
+
+  else if (style == MULTIDISL) multi_dislocations(&arg[2]); 
+
+  // displace atoms/elements according to theoretical displacement field of dislocation loop
+  
+  else if (style == DISLLOOP) dislloop(&arg[2]);
+
+  // displace atoms/elements according to displacement values from an external file
+
+  else if (style == DISPFILE) disp_file(&arg[2]); 
+
+  // move atoms/elements back inside simulation box and to new processors
+  // use remap() instead of pbc() in case atoms/elements moved a long distance
+  // use irregular() in case atoms/elements moved a long distance
+
+  double **ax = atom->x;
+  imageint *aimage = atom->image;
+  int nalocal = atom->nlocal;
+  for (int i = 0; i < nalocal; i++) domain->remap(ax[i], aimage[i]);
+
+  double **ex = element->x;
+  double ****nodex = element->nodex;
+  imageint *eimage = element->image;
+  int nelocal = element->nlocal;
+  int *npe = element->npe;
+  int *apc = element->apc;
+  int *etype = element->etype;
+  for (int i = 0; i < nelocal; i++) 
+    domain->remap(ex[i], nodex[i], eimage[i], apc[etype[i]], npe[etype[i]]);
+
+  if (domain->triclinic) {
+    domain->x2lamda(atom->nlocal, atom->x);
+    domain->x2lamda(element->nlocal, element->x);
+    domain->nodex2lamda(element->nlocal, element->nodex);
+  }
+  domain->reset_box();
+  IrregularComm *irregular_comm = new IrregularComm(cac);
+  irregular_comm->migrate(1);
+  delete irregular_comm;
+  if (domain->triclinic) {
+    domain->lamda2x(atom->nlocal, atom->x);
+    domain->lamda2x(element->nlocal, element->x);
+    domain->lamda2nodex(element->nlocal, element->nodex);
+  }
+
+  // check if any atoms/elements were lost
+
+  bigint natoms, nelements, nblocal;
+
+  nblocal = atom->nlocal;
+  MPI_Allreduce(&nblocal, &natoms, 1, MPI_CAC_BIGINT, MPI_SUM, world);
+  if (natoms != atom->natoms && comm->me == 0) {
+    char str[128];
+    sprintf(str, "Lost atoms via displace: original " BIGINT_FORMAT
+        " current " BIGINT_FORMAT, atom->natoms, natoms);
+    error->warning(FLERR, str);
+  }
+
+  nblocal = element->nlocal;
+  MPI_Allreduce(&nblocal, &nelements, 1, MPI_CAC_BIGINT, MPI_SUM, world);
+  if (nelements != element->nelements && comm->me == 0) {
+    char str[128];
+    sprintf(str, "Lost elements via displace: original " BIGINT_FORMAT
+        " current " BIGINT_FORMAT, element->nelements, nelements);
+    error->warning(FLERR, str);
+  }
+
+}
+
+/*  ----------------------------------------------------------------------
+   move atoms/elements/nodes in ramped fashion   
+   -------------------------------------------------------------------------  */
+
+void Displace::ramp(char **arg)
+{
+  int d_dim, i, j, k;
+
+  // displace direction 
+
+  if (strcmp(arg[0], "x") == 0) d_dim = 0;
+  else if (strcmp(arg[0], "y") == 0) d_dim = 1;
+  else if (strcmp(arg[0], "z") == 0) d_dim = 2;
+  else error->all(FLERR, "Illegal displace ramp command");
+
+  if ((domain->dimension == 2) && (d_dim == 2))
+    error->all(FLERR, "Must not displace atoms win z-direction with 2D system");
+
+  double d_lo, d_hi;
+  d_lo = xscale[d_dim] * universe->numeric(FLERR, arg[1]);
+  d_hi = xscale[d_dim] * universe->numeric(FLERR, arg[2]);
+
+  int coord_dim;
+  if (strcmp(arg[3], "x") == 0) coord_dim = 0;
+  else if (strcmp(arg[3], "y") == 0) coord_dim = 1;
+  else if (strcmp(arg[3], "z") == 0) coord_dim = 2;
+  else error->all(FLERR, "Illegal displace ramp command");
+
+  double coord_lo, coord_hi;
+  coord_lo = xscale[coord_dim] * universe->numeric(FLERR, arg[4]);
+  coord_hi = xscale[coord_dim] * universe->numeric(FLERR, arg[5]);
+
+  double **ax = atom->x;
+  int *amask = atom->mask;
+  int nalocal = atom->nlocal;
+  double ****nodex = element->nodex;
+  int *emask = element->mask;
+  int *etype = element->etype;
+  int ***nodemask = element->nodemask;
+  int nelocal = element->nlocal;
+  int *npe = element->npe;
+  int *apc = element->apc;
+
+  double fraction, dramp;
+
+  for (i = 0; i < nalocal; i++) 
+    if (amask[i] & groupbit) ramp_coord(coord_lo, coord_hi, d_lo, d_hi, ax[i], coord_dim, d_dim);
+
+  if (group_flag == Group::ATOM) return;
+
+  for (i = 0; i < nelocal; i++) 
+    if (group_flag == Group::ELEMENT) {
+      if (emask[i] & groupbit)
+        for (j = 0; j < apc[etype[i]]; j++) 
+          for (k = 0; k < npe[etype[i]]; k++) 
+            ramp_coord(coord_lo, coord_hi, d_lo, d_hi, nodex[i][j][k], coord_dim, d_dim);
+    } else if (group_flag == Group::NODE) {
+      for (j = 0; j < apc[etype[i]]; j++) 
+        for (k = 0; k < npe[etype[i]]; k++) 
+          if (nodemask[i][j][k] & groupbit)
+            ramp_coord(coord_lo, coord_hi, d_lo, d_hi, nodex[i][j][k], coord_dim, d_dim);
+    }
+  element->evec->update_center_coord();
+
+}
+
+/*  ----------------------------------------------------------------------
+   change coord according to ramped fashion
+   -------------------------------------------------------------------------  */
+
+void Displace::ramp_coord(double coord_lo, double coord_hi, 
+    double d_lo, double d_hi, double *coord, int coord_dim, int d_dim)
+{
+  double fraction = (coord[coord_dim] - coord_lo) / (coord_hi - coord_lo);
+  fraction = MAX(fraction, 0.0);
+  fraction = MIN(fraction, 1.0);
+  double dramp = d_lo + fraction * (d_hi - d_lo);
+  coord[d_dim] += dramp;
+}
+
+/*  ----------------------------------------------------------------------
+   move atoms/elements/nodes in ramped fashion in polar coordinates  
+   -------------------------------------------------------------------------  */
+
+void Displace::polar_ramp(char **arg)
+{
+  int d_dim, i, j, k;
+
+  // displace direction 
+
+  if (strcmp(arg[0], "r") == 0) d_dim = 0;
+  else if (strcmp(arg[0], "t") == 0) d_dim = 1;
+  else error->all(FLERR, "Illegal displace ramp/polar command");
+
+  double d_lo, d_hi;
+  d_lo = universe->numeric(FLERR, arg[1]);
+  d_hi = universe->numeric(FLERR, arg[2]);
+
+  int coord_dim;
+  if (strcmp(arg[3], "r") == 0) coord_dim = 0;
+  else if (strcmp(arg[3], "t") == 0) coord_dim = 1;
+  else error->all(FLERR, "Illegal displace ramp/polar command");
+
+  double coord_lo, coord_hi;
+  coord_lo = universe->numeric(FLERR, arg[4]);
+  coord_hi = universe->numeric(FLERR, arg[5]);
+  if (coord_dim == 1) 
+    if (coord_lo < -MY_PI || coord_hi > MY_PI) 
+      error->all(FLERR, "Hi/lo values for angular bound must be between -pi and +pi for displace ramp/polar command");
+
+
+  double n[3];
+  double p[3];
+  n[0] = universe->numeric(FLERR, arg[6]);
+  n[1] = universe->numeric(FLERR, arg[7]);
+  n[2] = universe->numeric(FLERR, arg[8]);
+  p[0] = universe->numeric(FLERR, arg[9]);
+  p[1] = universe->numeric(FLERR, arg[10]);
+  p[2] = universe->numeric(FLERR, arg[11]);
+
+  // normalize n and p vectors and check if they are perpendicular
+
+  norm3(n);
+  norm3(p);
+  if (dot3(n, p) > EPSILON2)
+    error->all(FLERR, "Plane normal and zero directions must be perpendicular in displace polar/ramp command");
+
+  double **ax = atom->x;
+  int *amask = atom->mask;
+  int nalocal = atom->nlocal;
+  double ****nodex = element->nodex;
+  int *emask = element->mask;
+  int *etype = element->etype;
+  int ***nodemask = element->nodemask;
+  int nelocal = element->nlocal;
+  int *npe = element->npe;
+  int *apc = element->apc;
+
+  double fraction, dramp;
+
+  for (i = 0; i < nalocal; i++) 
+    if (amask[i] & groupbit) polar_ramp_coord(coord_lo, coord_hi, d_lo, d_hi, ax[i], coord_dim, d_dim, n, p);
+
+  if (group_flag == Group::ATOM) return;
+
+  for (i = 0; i < nelocal; i++) 
+    if (group_flag == Group::ELEMENT) {
+      if (emask[i] & groupbit)
+        for (j = 0; j < apc[etype[i]]; j++) 
+          for (k = 0; k < npe[etype[i]]; k++) 
+            polar_ramp_coord(coord_lo, coord_hi, d_lo, d_hi, nodex[i][j][k], coord_dim, d_dim, n, p);
+    } else if (group_flag == Group::NODE) {
+      for (j = 0; j < apc[etype[i]]; j++) 
+        for (k = 0; k < npe[etype[i]]; k++) 
+          if (nodemask[i][j][k] & groupbit)
+            polar_ramp_coord(coord_lo, coord_hi, d_lo, d_hi, nodex[i][j][k], coord_dim, d_dim, n, p);
+    }
+  element->evec->update_center_coord();
+
+}
+
+
+/*  ----------------------------------------------------------------------
+   change polar coord according to ramped fashion
+   -------------------------------------------------------------------------  */
+
+void Displace::polar_ramp_coord(double coord_lo, double coord_hi, 
+    double d_lo, double d_hi, double *coord, int coord_dim, int d_dim, double *n, double *p)
+{
+  double polar_coord[2];
+  double r[3], p2[3], O[3];
+  copy3(n, O);
+  scale3(dot3(O, coord), O);
+  sub3(coord, O, r);
+  polar_coord[0] = len3(r); 
+  // skip if radial component is equal or near 0
+  if (polar_coord[0] < EPSILON2) return;
+
+  cross3(n, p, p2); 
+  double x = dot3(r, p);
+  double y = dot3(r, p2);
+  polar_coord[1] = atan2(y, x);
+  double fraction = (polar_coord[coord_dim] - coord_lo) / (coord_hi - coord_lo);
+  fraction = MAX(fraction, 0.0);
+  fraction = MIN(fraction, 1.0);
+  double dramp = d_lo + fraction * (d_hi - d_lo);
+  polar_coord[d_dim] += dramp;
+  double x2 = polar_coord[0] * cos(polar_coord[1]);
+  double y2 = polar_coord[0] * sin(polar_coord[1]);
+  double r2[3];
+  r2[0] = x2 * p[0] + y2 * p2[0];
+  r2[1] = x2 * p[1] + y2 * p2[1];
+  r2[2] = x2 * p[2] + y2 * p2[2];
+  add3(O, r2, coord);
+}
+
+/*  ----------------------------------------------------------------------
+   move atoms/elements/nodes by reflecting accross a mirror (x, y, or z plane)
+   -------------------------------------------------------------------------  */
+
+void Displace::mirror(char **arg)
+{
+  int dim;
+  if (strcmp(arg[0], "x") == 0) dim = 0;
+  else if (strcmp(arg[0], "y") == 0) dim = 1;
+  else if (strcmp(arg[0], "z") == 0) dim = 2;
+  double mirror_point = universe->numeric(FLERR, arg[1]);
+  for (int i = 0; i < atom->nlocal; i++) 
+    atom->x[i][dim] = 2.0 * mirror_point - atom->x[i][dim];
+  for (int i = 0; i < element->nlocal; i++) {
+    element->x[i][dim] = 2.0 * mirror_point - element->x[i][dim];
+    for (int j = 0; j < element->apc[element->etype[i]]; j++)
+      for (int k = 0; k < element->npe[element->etype[i]]; k++)
+        element->nodex[i][j][k][dim] = 2.0 * mirror_point - element->nodex[i][j][k][dim];
+  } 
+
+}
+
+/*  ----------------------------------------------------------------------
+   move atoms/elements/nodes either by specified numeric displacement or variable evaluation
+   -------------------------------------------------------------------------  */
+
+void Displace::move(int idim, char *arg)
+{
+  if (strstr(arg, "v_") != arg) {
+    double delta = xscale[idim] * universe->numeric(FLERR, arg);
+    move(idim, delta);
+  } else {
+    int ivar = input->variable->find(arg+2);
+    if (ivar < 0)
+      error->all(FLERR, "Variable name for displace does not exist");
+
+    if (input->variable->equalstyle(ivar)) {
+      double delta = xscale[idim] * input->variable->compute_equal(ivar);
+      move(idim, delta);
+    } else if (input->variable->atomstyle(ivar)) {
+      error->all(FLERR, "Atom style variable not working yet");
+      //if (mvec == nullptr) memory->create(mvec, nlocal, "displace:mvec");
+      //input->variable->compute_atom(ivar, igroup, mvec, 1, 0);
+      //for (int i = 0; i < nlocal; i++)
+      //  if (mask[i] & groupbit) x[i][idim] += scale * mvec[i];
+    } else error->all(FLERR, "Variable for displace is invalid style");
+  }
+}
+
+/*  ----------------------------------------------------------------------
+   parse optional parameters at end of displace input line
+   -------------------------------------------------------------------------  */
+
+void Displace::options(int narg, char **arg)
+{
+  if (narg < 0) error->all(FLERR, "Illegal displace command");
+
+  int iarg = 0;
+  while (iarg < narg) 
+    if (strcmp(arg[iarg], "units") == 0) {
+      if (iarg+2 > narg) error->all(FLERR, "Illegal displace command");
+      if (strcmp(arg[iarg+1], "box") == 0) scaleflag = 0;
+      else if (strcmp(arg[iarg+1], "lattice") == 0) scaleflag = 1;
+      else error->all(FLERR, "Illegal displace command");
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "group") == 0) {
+      if (iarg+2 > narg) error->all(FLERR, "Illegal displace command");
+      if (strcmp(arg[iarg+1], "atom") == 0) group_flag = Group::ATOM;
+      else if (strcmp(arg[iarg+1], "node") == 0) group_flag = Group::NODE;
+      else if (strcmp(arg[iarg+1], "element") == 0) group_flag = Group::ELEMENT;
+      else error->all(FLERR, "Illegal displace command");
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "sequence") == 0) {
+      if (style != MULTIDISL) error->all(FLERR, "Illegal displace command");
+      if (iarg+2 > narg) error->all(FLERR, "Illegal displace command");
+      if (strcmp(arg[iarg+1], "yes") == 0) sequence_flag = 1;
+      else if (strcmp(arg[iarg+1], "no") == 0) sequence_flag = 0;
+      else error->all(FLERR, "Illegal displace command");
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "index/offset") == 0) {
+      if (style != DISPFILE) error->all(FLERR, "Illegal displace command");
+      if (iarg+2 > narg) error->all(FLERR, "Illegal displace command");
+      index_offset = universe->inumeric(FLERR, arg[iarg+1]);;
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "header/offset") == 0) {
+      if (style != DISPFILE) error->all(FLERR, "Illegal displace command");
+      if (iarg+2 > narg) error->all(FLERR, "Illegal displace command");
+      nskip = universe->inumeric(FLERR, arg[iarg+1]);
+      if (nskip < 0) error->all(FLERR, "Invalid header/offset value");
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "tag/match") == 0) {
+      if (style != DISPFILE) error->all(FLERR, "Illegal displace command");
+      if (iarg+2 > narg) error->all(FLERR, "Illegal displace command");
+      if (strcmp(arg[iarg+1], "yes") == 0) tag_match_flag = 1;
+      else if (strcmp(arg[iarg+1], "no") == 0) tag_match_flag = 0;
+      else error->all(FLERR, "Illegal displace command");
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "reverse") == 0) {
+      if (style != DISPFILE) error->all(FLERR, "Illegal displace command");
+      if (iarg+2 > narg) error->all(FLERR, "Illegal displace command");
+      if (strcmp(arg[iarg+1], "yes") == 0) reverse_flag = -1;
+      else if (strcmp(arg[iarg+1], "no") == 0) reverse_flag = 1;
+      else error->all(FLERR, "Illegal displace command");
+      iarg += 2;
+    } else error->all(FLERR, "Illegal displace command");
+}
+
+/*  ----------------------------------------------------------------------
+   rotate atoms/elements by right-hand rule by theta around R
+   P = point = vector = point of rotation
+   R = vector = axis of rotation
+   R0 = runit = unit vector for R
+   D = X - P = vector from P to X
+   C = (D dot R0) R0 = projection of atom coord onto R line
+   A = D - C = vector from R line to X
+   B = R0 cross A = vector perp to A in plane of rotation
+   A, B define plane of circular rotation around R line
+   X = P + C + A cos(theta) + B sin(theta)
+   -------------------------------------------------------------------------  */
+
+void Displace::rotate(char **arg)
+{
+  double theta_new;
+  double axis[3], point[3], runit[3];
+
+  int dim = domain->dimension;
+  point[0] = xscale[0] * universe->numeric(FLERR, arg[0]);
+  point[1] = xscale[1] * universe->numeric(FLERR, arg[1]);
+  point[2] = xscale[2] * universe->numeric(FLERR, arg[2]);
+  axis[0] = universe->numeric(FLERR, arg[3]);
+  axis[1] = universe->numeric(FLERR, arg[4]);
+  axis[2] = universe->numeric(FLERR, arg[5]);
+  double theta = universe->numeric(FLERR, arg[6]);
+  if (dim == 2 && (axis[0] != 0.0 || axis[1] != 0.0))
+    error->all(FLERR, "Invalid displace rotate axis for 2d");
+
+  double len = sqrt(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
+  if (len == 0.0)
+    error->all(FLERR, "Zero length rotation vector with displace");
+  runit[0] = axis[0]/len;
+  runit[1] = axis[1]/len;
+  runit[2] = axis[2]/len;
+
+  double angle = MY_PI * theta / 180.0;
+  double cosine = cos(angle);
+  double sine = sin(angle);
+
+  double **ax = atom->x;
+  int *amask = atom->mask;
+  int nalocal = atom->nlocal;
+  imageint *aimage = atom->image;
+
+  for (int i = 0; i < nalocal; i++) {
+    if (amask[i] & groupbit) {
+      // unwrap coordinate and reset image flags accordingly
+      domain->unmap(ax[i], aimage[i]);
+      aimage[i] = ((imageint) IMGMAX << IMG2BITS) |
+        ((imageint) IMGMAX << IMGBITS) | IMGMAX;
+      rotate_point(ax[i], point, runit, cosine, sine);
+    }
+  }
+
+  if (group_flag == Group::ATOM) return;
+
+  double **ex = element->x;
+  double ****nodex = element->nodex;
+
+  int *emask = element->mask;
+  int nelocal = element->nlocal;
+  int *etype = element->etype;
+  int *npe = element->npe;
+  int *apc = element->apc;
+  imageint *eimage = element->image;
+
+  for (int i = 0; i < nelocal; i++) {
+    if (emask[i] & groupbit) {
+      // unwrap coordinate and reset image flags accordingly
+      domain->unmap(ex[i], nodex[i], eimage[i], apc[etype[i]], npe[etype[i]]);
+      eimage[i] = ((imageint) IMGMAX << IMG2BITS) |
+        ((imageint) IMGMAX << IMGBITS) | IMGMAX;
+
+      rotate_point(ex[i], point, runit, cosine, sine);
+      for (int j = 0; j < apc[etype[i]]; j++)
+        for (int k = 0; k < npe[etype[i]]; k++)
+          rotate_point(nodex[i][j][k], point, runit, cosine, sine);
+    }
+  }
+}
+
+/*  ----------------------------------------------------------------------  */
+
+void Displace::rotate_point(double *x, double *point, double *runit, double cosine, double sine)
+{
+  double a[3], b[3], c[3], d[3], disp[3];
+  double ddotr;
+  d[0] = x[0] - point[0];
+  d[1] = x[1] - point[1];
+  d[2] = x[2] - point[2];
+  ddotr = d[0] * runit[0] + d[1] * runit[1] + d[2] * runit[2];
+  c[0] = ddotr * runit[0];
+  c[1] = ddotr * runit[1];
+  c[2] = ddotr * runit[2];
+  a[0] = d[0] - c[0];
+  a[1] = d[1] - c[1];
+  a[2] = d[2] - c[2];
+  b[0] = runit[1] * a[2] - runit[2] * a[1];
+  b[1] = runit[2] * a[0] - runit[0] * a[2];
+  b[2] = runit[0] * a[1] - runit[1] * a[0];
+  disp[0] = a[0] * cosine  + b[0] * sine;
+  disp[1] = a[1] * cosine  + b[1] * sine;
+  disp[2] = a[2] * cosine  + b[2] * sine;
+  x[0] = point[0] + c[0] + disp[0];
+  x[1] = point[1] + c[1] + disp[1];
+  if (domain->dimension == 3) x[2] = point[2] + c[2] + disp[2];
+}
+
+/*  ----------------------------------------------------------------------
+   move atoms/elements according to theoretical dislocation displacement field 
+   create multiple dislocations
+   -------------------------------------------------------------------------  */
+
+void Displace::dislocations(char **arg)
+{
+  int ndisl = universe->inumeric(FLERR, arg[0]);
+
+  std::vector<dislocation_info> disls(ndisl);
+
+  for (int idisl = 0; idisl < ndisl; idisl++) {
+    int dim_flag[3] = {1, 1, 1};
+
+    // dislocation line direction
+    if (strcmp(arg[idisl * 8 + 1], "x") == 0) {
+      disls[idisl].d_dim = 0;
+      dim_flag[0] = 0;
+    } else if (strcmp(arg[idisl * 8 + 1], "y") == 0) {
+      disls[idisl].d_dim = 1;
+      dim_flag[1] = 0;
+    } else if (strcmp(arg[idisl * 8 + 1], "z") == 0) {
+      disls[idisl].d_dim = 2;
+      dim_flag[2] = 0;
+    } else error->all(FLERR, "Illegal displace dislocation command: invalid dislocation line direction");
+
+    // slip direction
+    if (strcmp(arg[idisl * 8 + 4], "+x") == 0) {
+      disls[idisl].slip_dim = 0;
+      dim_flag[0] = 0;
+      disls[idisl].direction = 1;
+    } else if (strcmp(arg[idisl * 8 + 4], "+y") == 0) {
+      disls[idisl].slip_dim = 1;
+      dim_flag[1] = 0;
+      disls[idisl].direction = 1;
+    } else if (strcmp(arg[idisl * 8 + 4], "+z") == 0) {
+      disls[idisl].slip_dim = 2;
+      dim_flag[2] = 0;
+      disls[idisl].direction = 1;
+    } else if (strcmp(arg[idisl * 8 + 4], "-x") == 0) {
+      disls[idisl].slip_dim = 0;
+      dim_flag[0] = 0;
+      disls[idisl].direction = -1;
+    } else if (strcmp(arg[idisl * 8 + 4], "-y") == 0) {
+      disls[idisl].slip_dim = 1;
+      dim_flag[1] = 0;
+      disls[idisl].direction = -1;
+    } else if (strcmp(arg[idisl * 8 + 4], "-z") == 0) {
+      disls[idisl].slip_dim = 2;
+      dim_flag[2] = 0;
+      disls[idisl].direction = -1;
+    } else error->all(FLERR, "Illegal displace dislocation command: invalid splip direction");
+
+    if (disls[idisl].slip_dim == disls[idisl].d_dim)
+      error->all(FLERR, "Illegal displace dislocation command: splip direction and dislocation line direction must be different");
+
+    disls[idisl].dim1 = disls[idisl].slip_dim;
+    disls[idisl].dim2 = dim_flag[0] * 0 + dim_flag[1] * 1 + dim_flag[2] * 2;
+
+    if (disls[idisl].dim1 == (disls[idisl].d_dim + 1) % 3) {
+      disls[idisl].center1 = universe->numeric(FLERR, arg[idisl * 8 + 2]);
+      disls[idisl].center2 = universe->numeric(FLERR, arg[idisl * 8 + 3]);
+    } else {
+      disls[idisl].center1 = universe->numeric(FLERR, arg[idisl * 8 + 3]);
+      disls[idisl].center2 = universe->numeric(FLERR, arg[idisl * 8 + 2]);
+    }
+
+    disls[idisl].b = universe->numeric(FLERR, arg[idisl * 8 + 5]);
+    disls[idisl].disl_angle = universe->numeric(FLERR, arg[idisl * 8 + 6]);
+    disls[idisl].v = universe->numeric(FLERR, arg[idisl * 8 + 7]);
+    disls[idisl].theta = universe->numeric(FLERR, arg[idisl * 8 + 8]) / 180.0 * MY_PI;
+
+    // check for errors
+    if (disls[idisl].v >= 1.0 || disls[idisl].v < 0.0)
+      error->all(FLERR, "Illegal displace dislocation command: Invalid poisson's ratio");
+  }
+
+  double **ax = atom->x;
+  int nalocal = atom->nlocal;
+  double ****nodex = element->nodex;
+  int *etype = element->etype;
+  int nelocal = element->nlocal;
+  int *npe = element->npe;
+  int *apc = element->apc;
+  
+  std::vector<double> u1(ndisl);
+  std::vector<double> u2(ndisl);
+  std::vector<double> u3(ndisl);
+
+  double x1, x2;
+
+  // displace atoms
+  if (nalocal)
+    for (int i = 0; i < nalocal; i++) {
+      for (int idisl = 0; idisl < ndisl; idisl++) {
+        double bedge = disls[idisl].b * sin(disls[idisl].disl_angle / 180.0 * MY_PI);
+        double bscrew = disls[idisl].b * cos(disls[idisl].disl_angle / 180.0 * MY_PI);
+        x1 = disls[idisl].direction * (ax[i][disls[idisl].dim1] - disls[idisl].center1);
+        x2 = disls[idisl].direction * (ax[i][disls[idisl].dim2] - disls[idisl].center2);
+        u1[idisl] = u2[idisl] = u3[idisl] = 0.0;
+        edge_dislocation_field(u1[idisl], u2[idisl], x1, x2, bedge, disls[idisl].v, disls[idisl].theta);
+        screw_dislocation_field(u3[idisl], x1, x2, bscrew, disls[idisl].theta);
+      }
+      for (int idisl = 0; idisl < ndisl; idisl++) {
+        ax[i][disls[idisl].dim1] += u1[idisl];
+        ax[i][disls[idisl].dim2] += u2[idisl];
+        ax[i][disls[idisl].d_dim] += u3[idisl];
+      }
+    }
+
+  // displace elements
+  if (nelocal) {
+    for (int i = 0; i < nelocal; i++) {
+      for (int j = 0; j < apc[etype[i]]; j++) {
+        for (int k = 0; k < npe[etype[i]]; k++) {
+          for (int idisl = 0; idisl < ndisl; idisl++) {
+            double bedge = disls[idisl].b * sin(disls[idisl].disl_angle / 180.0 * MY_PI);
+            double bscrew = disls[idisl].b * cos(disls[idisl].disl_angle / 180.0 * MY_PI);
+            x1 = disls[idisl].direction * (nodex[i][j][k][disls[idisl].dim1] - disls[idisl].center1);
+            x2 = disls[idisl].direction * (nodex[i][j][k][disls[idisl].dim2] - disls[idisl].center2);
+            u1[idisl] = u2[idisl] = u3[idisl] = 0.0;
+            edge_dislocation_field(u1[idisl], u2[idisl], x1, x2, bedge, disls[idisl].v, disls[idisl].theta);
+            screw_dislocation_field(u3[idisl], x1, x2, bscrew, disls[idisl].theta);
+          }
+          for (int idisl = 0; idisl < ndisl; idisl++) {
+            nodex[i][j][k][disls[idisl].dim1] += u1[idisl];
+            nodex[i][j][k][disls[idisl].dim2] += u2[idisl];
+            nodex[i][j][k][disls[idisl].d_dim] += u3[idisl];
+          }
+        }
+      }
+    }
+    element->evec->update_center_coord();
+  }
+}
+
+
+/*  ----------------------------------------------------------------------
+    move atoms/elements according to theoretical dislocation displacement field 
+    create multiple dislocations
+    -------------------------------------------------------------------------  */
+
+void Displace::multi_dislocations(char **arg)
+{
+  int d_dim, slip_dim, r_dim, i, j, k, dim_flag[3];
+  dim_flag[0] = dim_flag[1] = dim_flag[2] = 1;
+
+  int ndisl = universe->inumeric(FLERR, arg[0]); // number of dislocations
+
+  // dislocation line direction
+
+  if (strcmp(arg[1], "x") == 0) {
+    d_dim = 0;
+    dim_flag[0] = 0;
+  } else if (strcmp(arg[1], "y") == 0) {
+    d_dim = 1;
+    dim_flag[1] = 0;
+  } else if (strcmp(arg[1], "z") == 0) {
+    d_dim = 2;
+    dim_flag[2] = 0;
+  } else error->all(FLERR, "Illegal displace dislocation command:"
+      "invalid dislocation line direction");
+
+  // slip direction
+
+  int direction;
+  if (strcmp(arg[4], "+x") == 0) {
+    slip_dim = 0;
+    dim_flag[0] = 0;
+    direction = 1;
+  } else if (strcmp(arg[4], "+y") == 0) {
+    slip_dim = 1;
+    dim_flag[1] = 0;
+    direction = 1;
+  } else if (strcmp(arg[4], "+z") == 0) {
+    slip_dim = 2;
+    dim_flag[2] = 0;
+    direction = 1;
+  } else if (strcmp(arg[4], "-x") == 0) {
+    slip_dim = 0;
+    dim_flag[0] = 0;
+    direction = -1;
+  } else if (strcmp(arg[4], "-y") == 0) {
+    slip_dim = 1;
+    dim_flag[1] = 0;
+    direction = -1;
+  } else if (strcmp(arg[4], "-z") == 0) {
+    slip_dim = 2;
+    dim_flag[2] = 0;
+    direction = -1;
+  } else error->all(FLERR, "Illegal displace dislocation command:"
+      "invalid splip direction");
+
+  if (slip_dim == d_dim) 
+    error->all(FLERR, "Illegal displace dislocation command:"
+        "splip direction and dislocation line direction must be different");
+
+  int dim1 = slip_dim;
+  int dim2 = dim_flag[0] * 0 + dim_flag[1] * 1 + dim_flag[2] * 2;
+  double center1, center2;
+  double offset, ratio;
+  double b;           // Burgers vector
+  double theta;       // rotation angle (in degrees) about dislocation line direction
+  double disl_angle;  // angle (in degrees) between Burgers vector and 
+  // dislocation line direction (toward slip direction)
+  double v;           // Poisson's ratio
+  double u, u1, u2, x1, x2; 
+
+  if (dim1 == (d_dim + 1)%3) {
+    center1 = universe->numeric(FLERR, arg[2]);
+    center2 = universe->numeric(FLERR, arg[3]);
+  } else {
+    center1 = universe->numeric(FLERR, arg[3]);
+    center2 = universe->numeric(FLERR, arg[2]);
+  }
+
+  offset = universe->numeric(FLERR, arg[5]);     // offset distance between dislocation
+  ratio = universe->numeric(FLERR, arg[6]);      // ratio between each offset
+  b = universe->numeric(FLERR, arg[7]);
+  disl_angle = universe->numeric(FLERR, arg[8]);
+  v = universe->numeric(FLERR, arg[9]);
+  theta = universe->numeric(FLERR, arg[10]) / 180 * MY_PI;
+
+  // check for errors
+
+  if (offset == 0) error->all(FLERR, "Illegal displace dislocation command: "
+      "offset between dislocation can't be 0");
+  if (ratio <= 0) error->all(FLERR, "Illegal displace dislocation command: "
+      "ratio must be positive");
+  //if (b <= 0) error->all(FLERR, "Illegal displace dislocation command: "
+  //    "Burger vector must be positive");
+  if (v >= 1 || v < 0) 
+    error->all(FLERR, "Illegal displace dislocation command: "
+        "Invalid poisson's ratio");
+
+  double bedge = b * sin(disl_angle / 180 * MY_PI);
+  double bscrew = b * cos(disl_angle / 180 * MY_PI);
+
+  double *list_center1 = new double[ndisl];
+
+  list_center1[0] = center1;
+  for (int idisl = 1; idisl < ndisl; idisl++) 
+    list_center1[idisl] = list_center1[idisl-1] + offset * pow(ratio, idisl-1);
+
+  double **ax = atom->x;
+  int nalocal = atom->nlocal;
+  double ****nodex = element->nodex;
+  int *etype = element->etype;
+  int nelocal = element->nlocal;
+  int *npe = element->npe;
+  int *apc = element->apc;
+
+  // displace atoms
+
+  if (nalocal) 
+    for (i = 0; i < nalocal; i++) {
+      if (sequence_flag) {
+        for (int idisl = 0; idisl < ndisl; idisl++) {
+          u = u1 = u2 = 0.0;
+          x1 = direction * (ax[i][dim1] - list_center1[idisl]);
+          x2 = direction * (ax[i][dim2] - center2);
+          edge_dislocation_field(u1, u2, x1, x2, bedge, v, theta);
+          screw_dislocation_field(u, x1, x2, bscrew, theta);
+          ax[i][dim1] += u1;
+          ax[i][dim2] += u2;
+          ax[i][d_dim] += u;
+        }
+      } else {
+        u = u1 = u2 = 0.0;
+        x2 = direction * (ax[i][dim2] - center2);
+        for (int idisl = 0; idisl < ndisl; idisl++) {
+          x1 = direction * (ax[i][dim1] - list_center1[idisl]);
+          edge_dislocation_field(u1, u2, x1, x2, bedge, v, theta);
+          screw_dislocation_field(u, x1, x2, bscrew, theta);
+        }
+        ax[i][dim1] += u1;
+        ax[i][dim2] += u2;
+        ax[i][d_dim] += u;
+      }
+    }
+
+  // displace elements
+
+  if (nelocal) {
+    for (i = 0; i < nelocal; i++)
+      for (j = 0; j < apc[etype[i]]; j++) 
+        for (k = 0; k < npe[etype[i]]; k++) {
+          if (sequence_flag) {
+            for (int idisl = 0; idisl < ndisl; idisl++) {
+              u = u1 = u2 = 0.0;
+              x1 = direction *
+                (nodex[i][j][k][dim1] - list_center1[idisl]);
+              x2 = direction *
+                (nodex[i][j][k][dim2] - center2);
+              edge_dislocation_field(u1, u2, x1, x2, bedge, v, theta);
+              screw_dislocation_field(u, x1, x2, bscrew, theta);
+              nodex[i][j][k][dim1] += u1;
+              nodex[i][j][k][dim2] += u2;
+              nodex[i][j][k][d_dim] += u;
+            }
+          } else {
+            u = u1 = u2 = 0.0;
+            x2 = direction *
+              (nodex[i][j][k][dim2] - center2);
+            for (int idisl = 0; idisl < ndisl; idisl++) {
+              x1 = direction *
+                (nodex[i][j][k][dim1] - list_center1[idisl]);
+              edge_dislocation_field(u1, u2, x1, x2, bedge, v, theta);
+              screw_dislocation_field(u, x1, x2, bscrew, theta);
+            }
+            nodex[i][j][k][dim1] += u1;
+            nodex[i][j][k][dim2] += u2;
+            nodex[i][j][k][d_dim] += u;
+          }
+        }
+    element->evec->update_center_coord();
+  }
+  delete [] list_center1;
+}
+
+
+/*  ----------------------------------------------------------------------
+    calculate Volterras dislocation displacement field 
+    -------------------------------------------------------------------------  */
+
+void Displace::edge_dislocation_field(double &u1, double &u2, 
+    double x1tmp, double x2tmp, double b, double v, double theta)
+{
+  double x1 =   x1tmp * cos(theta) + x2tmp * sin(theta); 
+  double x2 = - x1tmp * sin(theta) + x2tmp * cos(theta); 
+
+  double rsq = x1 * x1 + x2 * x2;
+
+  if (rsq < EPSILON)
+    error->one(FLERR, "Atom/Node too close to singularity ");
+
+  // for u1: need range of inverse tan to be from 0 to 2 * pi
+  // range of atan2 is from -pi to +pi so add a pi to offset
+
+  double u1tmp = b / MY_2PI * ((atan2(x2, x1) + MY_PI) + x1 * x2/(2.0 * (1-v) * rsq));
+  double u2tmp = -b / (MY_8PI * (1-v)) * ((1-2 * v) * log(rsq) + (x1 * x1-x2 * x2)/rsq);
+  u1 += u1tmp * cos(theta) - u2tmp * sin(theta);
+  u2 += u1tmp * sin(theta) + u2tmp * cos(theta);
+}
+
+/*  ----------------------------------------------------------------------
+    calculate Volterras screw dislocation displacement field 
+    -------------------------------------------------------------------------  */
+
+void Displace::screw_dislocation_field(double &u, double x1tmp, double x2tmp, double b, double theta)
+{
+  double x1 =   x1tmp * cos(theta) + x2tmp * sin(theta); 
+  double x2 = - x1tmp * sin(theta) + x2tmp * cos(theta); 
+
+  // need range of inverse tan to be from 0 to 2 * pi
+  // range of atan2 is from -pi to +pi so add a pi to offset
+
+  u += b/MY_2PI * (atan2(x2, x1) + MY_PI);
+}
+
+/*  ----------------------------------------------------------------------
+    move all atoms/elements/nodes in group by delta along dimension dim
+    -------------------------------------------------------------------------  */
+
+void Displace::move(int dim, double delta)
+{
+  double **x = atom->x;
+  int *mask = atom->mask;
+  for (int i = 0; i < atom->nlocal; i++)
+    if (mask[i] & groupbit) x[i][dim] += delta;
+
+  if (group_flag == Group::ATOM) return;
+
+  double ****nodex = element->nodex;
+  mask = element->mask;
+  int ***nodemask = element->nodemask;
+  int *npe = element->npe;
+  int *apc = element->apc;
+  int *etype = element->etype;
+  for (int i = 0; i < element->nlocal; i++)
+    if (group_flag == Group::ELEMENT) {
+      if (mask[i] & groupbit)
+        for (int j = 0; j < apc[etype[i]]; j++) 
+          for (int k = 0; k < npe[etype[i]]; k++)
+            nodex[i][j][k][dim] += delta;
+    } else if (group_flag == Group::NODE) {
+      for (int j = 0; j < apc[etype[i]]; j++)
+        for (int k = 0; k < npe[etype[i]]; k++)
+          if (nodemask[i][j][k] & groupbit) 
+            nodex[i][j][k][dim] += delta;
+    }
+  element->evec->update_center_coord();
+}
+
+/*  ----------------------------------------------------------------------
+    move atoms/elements/nodes according to displacement values from an external file
+    -------------------------------------------------------------------------  */
+
+void Displace::disp_file(char **arg)
+{
+  int nchunk, eof, ii, i, m;
+  FILE *fp = nullptr;
+
+  if (comm->me == 0) {
+    fp = fopen(arg[0], "r");
+    if (fp == nullptr) error->one(FLERR, "Cannot open displacement file");
+  }
+
+  int elem_mapflag = 0;
+  int atom_mapflag = 0;
+  char *buffer = new char[MAXLINE * CHUNK];
+  char *next, *buf;
+  char **values = new char*[5];
+  tagint itag;
+  int index, inode, ibasis, ietype, iapc;
+  double dx, dy, dz;
+  double **x = atom->x;
+  double ****nodex = element->nodex;
+  int *npe = element->npe;
+  int *apc = element->apc;
+  int *etype = element->etype;
+  int *amask = atom->mask;
+  int *emask = element->mask;
+  int ***nodemask = element->nodemask;
+
+  if (atom->map_style == 0) {
+    atom_mapflag = 1;
+    atom->map_init();
+    atom->map_set();
+  }
+
+  if (element->map_style == 0) {
+    elem_mapflag = 1;
+    element->map_init();
+    element->map_set();
+  }
+
+  bigint ntotal;
+  bigint nread = 0;
+  if (tag_match_flag) {
+    ntotal = atom->natoms + element->nnodes;
+    // skip header section of the file
+
+    eof = comm->read_lines_from_file(fp, nskip, MAXLINE, buffer);
+    if (eof) error->all(FLERR, "Unexpected end of displacement file");
+
+  } else {
+    if (nskip < 4) error->all(FLERR,"Have at least 4 header lines");
+    eof = comm->read_lines_from_file(fp, 3, MAXLINE, buffer);
+    if (eof) error->all(FLERR, "Unexpected end of displacement file");
+    eof = comm->read_lines_from_file(fp, 1, MAXLINE, buffer);
+    if (eof) error->all(FLERR, "Unexpected end of displacement file");
+    buf = buffer;
+    ntotal = atoi(strtok(buf, " \t\n\r\f"));
+    if (ntotal <= 0)
+      error->all(FLERR, "Incorrect format in displacement file");
+
+    // skip header section of the file
+
+    eof = comm->read_lines_from_file(fp, nskip - 4, MAXLINE, buffer);
+    if (eof) error->all(FLERR, "Unexpected end of displacement file");
+
+  }
+
+  while (nread < ntotal) {
+    nchunk = MIN(ntotal-nread, CHUNK);
+    eof = comm->read_lines_from_file(fp, nchunk, MAXLINE, buffer);
+    if (eof) error->all(FLERR, "Unexpected end of displacement file");
+
+    next = strchr(buffer, '\n');
+    *next = '\0';
+    if (universe->count_words(buffer) != 5) error->all(FLERR, "Incorrect format in displacement file");
+    *next = '\n';
+
+    buf = buffer;
+    for (ii = 0; ii < nchunk; ii++) {
+
+      next = strchr(buf, '\n');
+
+
+      values[0] = strtok(buf, " \t\n\r\f");
+      if (values[0] == nullptr)
+        error->all(FLERR, "Incorrect format in displacement file");
+      for (m = 1; m < 5; m++) {
+        values[m] = strtok(nullptr, " \t\n\r\f");
+        if (values[m] == nullptr) {
+          printf("nread = %d m = %d values[0] = %s \n",nread+ii,m,values[0]);
+          error->all(FLERR, "Incorrect format in displacement file");
+        }
+      }
+      itag = ATOTAGINT(values[0]);
+      index = atoi(values[1]) - 1 - index_offset;
+      dx = atof(values[2]) * reverse_flag;
+      dy = atof(values[3]) * reverse_flag;
+      dz = atof(values[4]) * reverse_flag;
+
+
+      if (index == -1) {
+
+        if (itag <= 0 || itag > atom->map_tag_max) {
+          if (itag > atom->map_tag_max && tag_match_flag == 0) {
+            buf = next + 1;
+            continue;
+          } else {
+            printf("itag = %d map_tag_max = %d\n", itag, atom->map_tag_max);
+            error->one(FLERR, "Invalid ID in displacement file");
+          }
+        }
+
+        if ((i = atom->map(itag)) >= 0) 
+          if (amask[i] & groupbit) {
+            x[i][0] += dx;  
+            x[i][1] += dy;  
+            x[i][2] += dz;  
+          }
+      } else if (index >= 0) {
+        if (itag <= 0 || itag > element->map_tag_max) {
+          if (itag > element->map_tag_max && tag_match_flag == 0) {
+            buf = next + 1;
+            continue;
+          } else {
+            printf("itag = %d map_tag_max = %d\n", itag, element->map_tag_max);
+            error->one(FLERR, "Invalid ID in displacement file");
+          }
+        }
+        if ((i = element->map(itag)) >= 0) {
+          ietype = etype[i];
+          iapc = apc[ietype];
+          inode = index / iapc;
+          ibasis = index % iapc;
+
+          if (group_flag == Group::ELEMENT) {
+            if (emask[i] & groupbit) {
+              if (inode < npe[ietype]) {
+                nodex[i][ibasis][inode][0] += dx;
+                nodex[i][ibasis][inode][1] += dy;
+                nodex[i][ibasis][inode][2] += dz;
+              } else {
+                printf("itag = %d inode = %d npe = %d index = %d\n", itag, inode, npe[ietype], index);
+                error->one(FLERR, "node index is out-of-bound");
+              }
+            }
+          } else if (group_flag == Group::NODE) {
+            if (inode > npe[etype[i]]) {
+              if (nodemask[i][ibasis][inode] & groupbit) {
+                nodex[i][ibasis][inode][0] += dx;
+                nodex[i][ibasis][inode][1] += dy;
+                nodex[i][ibasis][inode][2] += dz;
+              }
+            } else error->one(FLERR, "Node index is out-of-bound");
+          }
+        }
+      } else error->all(FLERR, "Node index must be positive");
+      buf = next + 1;
+    }
+    nread += nchunk;
+  }
+
+  element->evec->update_center_coord();
+
+  if (atom_mapflag) {
+    atom->map_delete();
+    atom->map_style = 0;
+  }
+
+  if (elem_mapflag) {
+    element->map_delete();
+    element->map_style = 0;
+  }
+
+  delete [] buffer;
+  delete [] values;
+  if (comm->me == 0) fclose(fp);
+}
+
+/* ----------------------------------------------------------------------
+   Move atoms/elements according to a dislocation loop (Finite Segment Method)
+   Syntax: displace group dislloop shape cx cy cz nx ny nz R bx by bz nu
+------------------------------------------------------------------------- */
+
+void Displace::dislloop(char **arg)
+{
+  char *shape = arg[0];
+
+  double center[3], n[3], b[3];
+  
+  center[0] = universe->numeric(FLERR, arg[1]);
+  center[1] = universe->numeric(FLERR, arg[2]);
+  center[2] = universe->numeric(FLERR, arg[3]);
+  
+  n[0] = universe->numeric(FLERR, arg[4]);
+  n[1] = universe->numeric(FLERR, arg[5]);
+  n[2] = universe->numeric(FLERR, arg[6]);
+  norm3(n); 
+  
+  double R = universe->numeric(FLERR, arg[7]);
+  
+  b[0] = universe->numeric(FLERR, arg[8]);
+  b[1] = universe->numeric(FLERR, arg[9]);
+  b[2] = universe->numeric(FLERR, arg[10]);
+  
+  double nu = universe->numeric(FLERR, arg[11]);
+
+  if (nu >= 0.5 || nu < -1.0)
+    error->all(FLERR, "Illegal displace disl/loop command: Invalid Poisson's ratio");
+
+  int npoints;
+  double **xLoop;
+
+  // Create two orthogonal vectors (u_vec, v_vec) lying in the loop plane
+  double u_vec[3], v_vec[3];
+  if (abs(n[0]) > 0.9) {
+    u_vec[0] = 0.0; u_vec[1] = 1.0; u_vec[2] = 0.0;
+  } else {
+    u_vec[0] = 1.0; u_vec[1] = 0.0; u_vec[2] = 0.0;
+  }
+  cross3(n, u_vec, v_vec);
+  norm3(v_vec);
+  cross3(v_vec, n, u_vec);
+  norm3(u_vec);
+
+  if (strcmp(shape, "circle") == 0) {
+    npoints = 60;
+    memory->create(xLoop, npoints, 3, "displace:xLoop");
+    for (int i = 0; i < npoints; i++) {
+      double theta = 2.0 * MY_PI * (double)i / (double)npoints;
+      xLoop[i][0] = center[0] + R * cos(theta) * u_vec[0] + R * sin(theta) * v_vec[0];
+      xLoop[i][1] = center[1] + R * cos(theta) * u_vec[1] + R * sin(theta) * v_vec[1];
+      xLoop[i][2] = center[2] + R * cos(theta) * u_vec[2] + R * sin(theta) * v_vec[2];
+    }
+  } else if (strcmp(shape, "square") == 0) {
+    npoints = 4;
+    memory->create(xLoop, npoints, 3, "displace:xLoop");
+    double corners[4][2] = {{R, R}, {-R, R}, {-R, -R}, {R, -R}};
+    for (int i = 0; i < npoints; i++) {
+      xLoop[i][0] = center[0] + corners[i][0] * u_vec[0] + corners[i][1] * v_vec[0];
+      xLoop[i][1] = center[1] + corners[i][0] * u_vec[1] + corners[i][1] * v_vec[1];
+      xLoop[i][2] = center[2] + corners[i][0] * u_vec[2] + corners[i][1] * v_vec[2];
+    }
+  } else {
+    error->all(FLERR, "Illegal shape for displace disloop command. Use 'circle' or 'square'.");
+  }
+
+  double **ax = atom->x;
+  int nalocal = atom->nlocal;
+  double ****nodex = element->nodex;
+  int *etype = element->etype;
+  int nelocal = element->nlocal;
+  int *npe = element->npe;
+  int *apc = element->apc;
+
+  if (nalocal) {
+    for (int i = 0; i < nalocal; i++) {
+      double R_obs[3]; 
+      R_obs[0] = ax[i][0]; R_obs[1] = ax[i][1]; R_obs[2] = ax[i][2];
+
+      double xC[3];
+      sub3(center, R_obs, xC); 
+
+      double omega = 0.0;
+      double u_tot[3] = {0.0, 0.0, 0.0};
+
+      for (int s = 0; s < npoints; s++) {
+        int prev = (s == 0) ? npoints - 1 : s - 1;
+        double xA[3], xB[3];
+
+        sub3(xLoop[prev], R_obs, xA);
+        sub3(xLoop[s], R_obs, xB);
+
+        omega += solid_angle(xA, xB, xC);
+
+        double u_seg[3];
+        segment_displacement(xA, xB, b, nu, u_seg);
+        add3(u_tot, u_seg, u_tot);
+      }
+
+      ax[i][0] += u_tot[0] + b[0] * omega;
+      ax[i][1] += u_tot[1] + b[1] * omega;
+      ax[i][2] += u_tot[2] + b[2] * omega;
+    }
+  }
+
+  if (nelocal) {
+    for (int i = 0; i < nelocal; i++) {
+      for (int j = 0; j < apc[etype[i]]; j++) {
+        for (int k = 0; k < npe[etype[i]]; k++) {
+          double R_obs[3];
+          R_obs[0] = nodex[i][j][k][0]; 
+          R_obs[1] = nodex[i][j][k][1]; 
+          R_obs[2] = nodex[i][j][k][2];
+
+          double xC[3];
+          sub3(center, R_obs, xC);
+
+          double omega = 0.0;
+          double u_tot[3] = {0.0, 0.0, 0.0};
+
+          for (int s = 0; s < npoints; s++) {
+            int prev = (s == 0) ? npoints - 1 : s - 1;
+            double xA[3], xB[3];
+
+            sub3(xLoop[prev], R_obs, xA);
+            sub3(xLoop[s], R_obs, xB);
+
+            omega += solid_angle(xA, xB, xC);
+
+            double u_seg[3];
+            segment_displacement(xA, xB, b, nu, u_seg);
+            add3(u_tot, u_seg, u_tot);
+          }
+
+          nodex[i][j][k][0] += u_tot[0] + b[0] * omega;
+          nodex[i][j][k][1] += u_tot[1] + b[1] * omega;
+          nodex[i][j][k][2] += u_tot[2] + b[2] * omega;
+        }
+      }
+    }
+    element->evec->update_center_coord();
+  }
+  memory->destroy(xLoop);
+}
+
+/* ---------------------------------------------------------------------- */
+
+double Displace::solid_angle(double *xA, double *xB, double *xC)
+{
+  double rA = len3(xA);
+  double rB = len3(xB);
+  double rC = len3(xC);
+
+  double xA_cross_xB[3];
+  cross3(xA, xB, xA_cross_xB);
+
+  double numerator = dot3(xA_cross_xB, xC);
+  double denominator = rA * rB * rC + dot3(xA, xB) * rC + dot3(xB, xC) * rA + dot3(xC, xA) * rB;
+
+  return atan2(numerator, denominator) / (2.0 * MY_PI);
+}
+
+/* ---------------------------------------------------------------------- */
+
+void Displace::segment_displacement(double *xA, double *xB, double *b, double nu, double *u)
+{
+  double rA = len3(xA);
+  double rB = len3(xB);
+
+  double tAB[3];
+  sub3(xB, xA, tAB);
+  double len_tAB = len3(tAB);
+  if (len_tAB > EPSILON2) {
+    tAB[0] /= len_tAB; tAB[1] /= len_tAB; tAB[2] /= len_tAB;
+  }
+
+  double nAB[3];
+  cross3(xA, xB, nAB);
+  double len_nAB = len3(nAB);
+  if (len_nAB > EPSILON2) {
+    nAB[0] /= len_nAB; nAB[1] /= len_nAB; nAB[2] /= len_nAB;
+  } else {
+    error->one(FLERR, "Atoms coordinate are too close to the dislocation loop plane");
+  }
+
+  double b_cross_tAB[3];
+  cross3(b, tAB, b_cross_tAB);
+  double b_dot_nAB = dot3(b, nAB);
+
+  double diff[3];
+  double rA_safe = (rA > EPSILON2) ? rA : EPSILON2;
+  double rB_safe = (rB > EPSILON2) ? rB : EPSILON2;
+
+  diff[0] = xB[0]/rB_safe - xA[0]/rA_safe;
+  diff[1] = xB[1]/rB_safe - xA[1]/rA_safe;
+  diff[2] = xB[2]/rB_safe - xA[2]/rA_safe;
+
+  double diff_cross_nAB[3];
+  cross3(diff, nAB, diff_cross_nAB);
+
+  double term_top = rB + dot3(xB, tAB);
+  double term_bot = rA + dot3(xA, tAB);
+  if (term_top < EPSILON2) term_top = EPSILON2;
+  if (term_bot < EPSILON2) term_bot = EPSILON2;
+
+  double log_term = log(term_top / term_bot);
+  double factor = 1.0 / (8.0 * MY_PI * (1.0 - nu));
+
+  u[0] = ( -(1.0 - 2.0*nu) * b_cross_tAB[0] * log_term + b_dot_nAB * diff_cross_nAB[0] ) * factor;
+  u[1] = ( -(1.0 - 2.0*nu) * b_cross_tAB[1] * log_term + b_dot_nAB * diff_cross_nAB[1] ) * factor;
+  u[2] = ( -(1.0 - 2.0*nu) * b_cross_tAB[2] * log_term + b_dot_nAB * diff_cross_nAB[2] ) * factor;
+}
+
+
+

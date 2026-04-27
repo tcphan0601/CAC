@@ -1,0 +1,38 @@
+#!/bin/bash
+#SBATCH --job-name="Job-name"
+#SBATCH --output="output.%j.%N"
+#SBATCH --error="error.%j.%N"
+#SBATCH --partition=compute
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=128
+#SBATCH --mem=240G
+#SBATCH --account=ios134
+#SBATCH --export=ALL
+#SBATCH -t 48:00:00
+#SBATCH --mail-user=[Your-Email-Here]
+#SBATCH --mail-type=ALL
+
+# load the singularity module if needed
+module purge
+module load slurm singularitypro cpu/0.17.3b  gcc/10.2.0/npcyll4 openmpi/4.1.1/ygduf2r
+
+
+# Bind the work and scratch folders for the specific HPC
+SINGULARITY_BIND_OPTS="--bind /expanse,/scratch,/home"
+
+# This is only needed if using DeepMD
+# Use the --env flag to pass environment variables directly into the container at runtime.
+# This is useful for setting threading and parallelism for TensorFlow/DeepMD.
+SINGULARITY_ENV_OPTS="--env OMP_NUM_THREADS=1 \
+                      --env DP_INTRA_OP_PARALLELISM_THREADS=${SLURM_NTASKS} \
+                      --env DP_INTER_OP_PARALLELISM_THREADS=1"
+
+INPUT_FILE=in.script
+
+# Change the path to your container image here
+CONTAINER_IMAGE=/home/tcphan/cac.sif
+
+mpirun -n ${SLURM_NTASKS} singularity run \
+            ${SINGULARITY_BIND_OPTS} ${SINGULARITY_ENV_OPTS} \
+            $CONTAINER_IMAGE -in $INPUT_FILE
+

@@ -20,3 +20,4 @@
 #include "write_data.h"
 #include "write_dump_neighbor_debug.h"
 #include "write_data_ghost_debug.h"
+#include "write_tecplot.h"
