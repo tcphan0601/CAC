@@ -62,6 +62,7 @@ obj/%.o:%.cpp
 	@ mkdir -p obj
 	$(CC) $(CCFLAGS) ${TECPLOT_INC} $(DEEPMD_INC) $(SHFLAGS) -c $< -o $@
 
+
 #-------------------------------------------------------------------
 # Package Management Targets (LAMMPS Style)
 #-------------------------------------------------------------------
